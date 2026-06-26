@@ -1,0 +1,15 @@
+import { Router } from 'express';
+
+const router = Router();
+
+// Phase 4: relay to FastAPI  POST /api/ai/buffer
+router.post('/buffer', (req, res) => {
+  res.status(501).json({ message: 'AI buffer endpoint — coming in Phase 4.' });
+});
+
+// Phase 4: relay to FastAPI  POST /api/ai/playlist
+router.post('/playlist', (req, res) => {
+  res.status(501).json({ message: 'AI playlist endpoint — coming in Phase 4.' });
+});
+
+export default router;
