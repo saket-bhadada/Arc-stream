@@ -1,26 +1,112 @@
-// client/src/components/Dashboard.jsx
-import React from 'react';
+import { useEffect,useRef } from "react";
+import {create} from 'zustand';
 
-const dashboard = ({ token }) => {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
-      <h2 style={{ color: '#1DB954' }}>✅ Authenticated</h2>
-      <p>Welcome to the Arc-Stream Control Center.</p>
-      
-      <div style={{ 
-        marginTop: '20px', 
-        padding: '20px', 
-        backgroundColor: '#282828', 
-        borderRadius: '10px',
-        maxWidth: '600px'
-      }}>
-        <h4 style={{ margin: '0 0 10px 0', color: '#b3b3b3' }}>Your Master Key:</h4>
-        <p style={{ wordBreak: 'break-all', fontSize: '12px', color: 'gray', margin: 0 }}>
-          {token}
-        </p>
-      </div>
-    </div>
-  );
+export const usePlayerStore = create((set) => ({
+
+  // ─── AUTH ─────────────────────────────────────────────────────────────────
+  accessToken:  null,
+  refreshToken: null,
+  expiresAt:    null,
+
+  setTokens: (accessToken, refreshToken, expiresIn) => set({
+    accessToken,
+    refreshToken,
+    expiresAt: Date.now() + expiresIn * 1000,
+  }),
+
+  updateAccessToken: (accessToken, expiresIn) => set({
+    accessToken,
+    expiresAt: Date.now() + expiresIn * 1000,
+  }),
+
+  clearTokens: () => set({ accessToken: null, refreshToken: null, expiresAt: null }),
+
+  // ─── SPOTIFY WEB PLAYBACK SDK ─────────────────────────────────────────────
+  player:   null,
+  deviceId: null,
+  isActive: false,
+
+  setPlayer:   (player)   => set({ player }),
+  setDeviceId: (deviceId) => set({ deviceId }),
+  setIsActive: (isActive) => set({ isActive }),
+
+  // ─── PLAYBACK STATE ───────────────────────────────────────────────────────
+  currentTrack: null,
+  isPlaying:    false,
+  position:     0,
+  duration:     0,
+
+  setCurrentTrack: (currentTrack) => set({ currentTrack }),
+  setIsPlaying:    (isPlaying)    => set({ isPlaying }),
+  setPosition:     (position)     => set({ position }),
+  setDuration:     (duration)     => set({ duration }),
+
+  // ─── ARC-STREAM AI STATE (written by Phase 4) ─────────────────────────────
+  sessionHistory:   [],
+  currentZSequence: [],
+  targetEnergy:     0.5,
+
+  addToHistory:        (trackId)  => set((s) => ({ sessionHistory: [...s.sessionHistory, trackId] })),
+  setCurrentZSequence: (sequence) => set({ currentZSequence: sequence }),
+  setTargetEnergy:     (energy)   => set({ targetEnergy: energy }),
+  resetSession: () => set({ sessionHistory: [], currentZSequence: [] }),
+}));
+
+const NODE_BASE = import.meta.env.VITE_API_URL||'http://localhost:3000';
+const SPOTIFY_BASE = 'https://api.spotify.com/v1';
+
+const transferPlayback = async(deviceId,accessToken,play=false)=>{
+  const res = await fetch(`${SPOTIFY_BASE}/ME/PLAYER`,{
+    method:'PUT',
+    headers:{'Authorization':'Bearer '+accessToken,
+      'content-type':'application/json',
+    },
+    body:JSON.stringify({device_ids:[deviceId],play}),
+  });
+  if(!res.ok&&res.status!==204){
+    throw new Error(`Transfer Playback failed:${res.status}`);
+  }
 };
 
-export default dashboard;
+const refreshToken = async (refreshToken)=>{
+  const res = await fetch(`${NODE_BASE}/refresh`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({refresh_token:refreshToken}),
+  });
+  if(!res.ok) throw new Error('Token refresh failed');
+  return res.json();
+};
+
+const addToQueue = async (trackUri, accessToken) => {
+  const res = await fetch(
+    `${SPOTIFY_BASE}/me/player/queue?uri=${encodeURIComponent(trackUri)}`,
+    { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) throw new Error(`Add to queue failed: ${res.status}`);
+};
+
+const useSpotifyPlayer = ()=>{
+  const scriptInjected = useRef(false);
+
+  const {
+    accessToken,
+    setPlayer,setDeviceId,setIsActive,
+    setCurrentTrack, setIsPlaying,setPosition,setDuration,
+    addToHistory,
+  } = usePlayerStore();
+
+  useEffect(()=>{
+    if(!accessToken||scriptInjected.current) return;
+    scriptInjected.current = true;
+
+    window.onSpotifyWebPlaybackSDKReady = () => {
+      const player = new window.Spotify.Player({
+        name:'Arc-Stream',
+        getOAuthToken:(callback)=>callback(usePlayerStore.getState().accessToken),
+        volume: 0.7,
+      });
+    }
+  })
+  
+}

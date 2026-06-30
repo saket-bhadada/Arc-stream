@@ -1,6 +1,6 @@
 import {useState, useEffect} from 'react';
 import Login from './components/login';
-import dashboard from './components/dashboard';
+import Dashboard from './components/dashboard';
 
 function App(){
   const [token,setToken] = useState(null);

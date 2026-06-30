@@ -44,11 +44,8 @@ const s = {
     marginTop: 12, backgroundColor: '#1DB954', color: '#000',
     padding: '16px 40px', borderRadius: 50, textDecoration: 'none',
     fontWeight: 800, letterSpacing: '1.5px', fontSize: 13,
-    transition: 'opacity 0.2s',
   },
-  disclaimer: {
-    margin: 0, color: '#374151', fontSize: 12,
-  },
+  disclaimer: { margin: 0, color: '#374151', fontSize: 12 },
 };
 
 export default LoginPage;
