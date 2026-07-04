@@ -1,35 +1,25 @@
-import {useState, useEffect} from 'react';
-import Login from './components/login';
-import Dashboard from './components/dashboard';
+// client/src/App.jsx
+import { useEffect } from 'react';
+import DashboardPage from './components/dashboard';
+import { usePlayerStore } from './store/playerStore';
+import LoginPage from './components/login';
 
-function App(){
-  const [token,setToken] = useState(null);
+function App() {
+  const { accessToken, setTokens } = usePlayerStore();
 
-  useEffect(()=>{
-    const hash = window.location.hash;
-    const urlparams = new URLSearchParams(window.location.search);
-    const accessToken = urlparams.get('access_token');
+  useEffect(() => {
+    const params        = new URLSearchParams(window.location.search);
+    const access_token  = params.get('access_token');
+    const refresh_token = params.get('refresh_token');
+    const expires_in    = params.get('expires_in');
 
-    if(accessToken){
-      setToken(accessToken);
-      window.history.pushState({},null,'/dashboard');
+    if (access_token) {
+      setTokens(access_token, refresh_token, parseInt(expires_in, 10));
+      window.history.replaceState({}, document.title, '/');
     }
-  },[]);
-  return (
-    <div style={{ 
-      backgroundColor: '#121212', 
-      color: 'white', 
-      minHeight: '100vh', 
-      display: 'flex', 
-      flexDirection: 'column', 
-      alignItems: 'center', 
-      justifyContent: 'center',
-      fontFamily: 'sans-serif'
-    }}>
-      {/* Conditional Rendering: If there is no token, show Login. Otherwise, show Dashboard. */}
-      {!token ? <Login /> : <Dashboard token={token} />}
-    </div>
-  );
+  }, []);
+
+  return accessToken ? <DashboardPage /> : <LoginPage />;
 }
 
 export default App;

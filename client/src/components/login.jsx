@@ -1,5 +1,5 @@
 // client/src/pages/LoginPage.jsx
-import React from 'react';
+
 
 const LoginPage = () => (
   <div style={s.page}>

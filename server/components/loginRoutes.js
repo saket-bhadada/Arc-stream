@@ -29,7 +29,7 @@ router.get('/callback',async(req,res)=>{
         const data = await spotifyApi.authorizationCodeGrant(code);
         const {access_token,refresh_token,expires_in} = data.body;
 
-        const redirect = new URL(process.env,Frontend_URL);
+        const redirect = new URL(process.env.Frontend_URL);
         redirect.searchParams.set('access_token',access_token);
         redirect.searchParams.set('refresh_token',refresh_token);
         redirect.searchParams.set('expires_in',expires_in);
