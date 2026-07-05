@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './components/authrouter.js';
 import airouter from './components/airouter.js';
+import db from './db.js';
 
 dotenv.config();
 

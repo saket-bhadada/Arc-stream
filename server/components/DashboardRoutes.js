@@ -1,7 +1,8 @@
 import { Router } from "express";
-import pg from "pg";
+import db from '../db.js';
 
-const {Pool} = pg;
 const router = Router();
+const ML_BASE = process.env.ML_BASE||'http://localhost:8000';
+const SPOTIFY_BASE = 'http://api.spotify.com/v1';
 
-const pool = new Pool({});
+const spotifyFetch = async
