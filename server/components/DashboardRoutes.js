@@ -57,5 +57,38 @@ router.post('/buffer',async(req,res)=>{
       throw new Error(`FastApi /predict_buffer ${mlRes.status}: ${mlErr}`);
     }
     const {tracks} = await mlRes.json();
-  }catch(err){}
+
+    for(const track of tracks) {
+      await spotifyFetch(
+        `/me/player/queue?uri=${encodeURIComponent(`spotify:track:${track.track_id}`)}`,
+        access_token,
+        { method: 'POST' }
+      );
+    }
+
+    for(const track of tracks) {
+      await db.query(
+        `INSERT INTO prediction_history
+           (session_id, target_energy, predicted_vector, recommended_track_id, created_at)
+         VALUES ($1, $2, $3, $4, NOW())`,
+        [
+          session_id,
+          target_energy,
+          JSON.stringify(track.predicted_vector),
+          track.track_id,
+        ]
+      )
+    }
+
+    console.log(
+      `[Buffer] Session ${session_id} — ` +
+      `queued ${tracks.length} tracks at energy ${target_energy}`
+    );
+
+    res.json({success:true,tracks});
+  }catch(err){
+    console.error('[Buffer] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
+
