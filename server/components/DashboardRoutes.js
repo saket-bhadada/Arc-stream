@@ -92,3 +92,50 @@ router.post('/buffer',async(req,res)=>{
   }
 });
 
+router.post('/playList',async(req,res)=>{
+  const {
+    access_token,
+    energy_curve,
+    current_z_sequence,
+    session_history,
+    playlist_name,
+  } = req.body;
+
+  if(!access_token) {
+    return res.status(401).json({error:'Missing access token'})
+  }
+  // if(!current_z_sequence||(current_z_sequence.length<5&&current_z_sequence.length>9)) {
+  //   return res.status(400).json({
+  //     error:'current_z_sequence must be an array of 5 to 9 z-vector'
+  //   })
+  // }
+  if(!energy_curve||!energy_curve.length) {
+    return res.status(400).json({
+      error:'energy_curve must be an array of energy values'
+    })
+  }
+  try{
+    const mlRes = await fetch(`${ML_BASE}/generate_playlist`,{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+      },
+      body: JSON.stringify({
+        energy_curve,
+        current_z_sequence,
+        session_history,
+      }),
+    });
+
+    if(!mlRes.ok) {
+      const mlErr = await mlRes.text();
+      throw new Error(`FastApi /generate_playlist ${mlRes.status}: ${mlErr}`);
+    }
+
+    const {tracks} = await mlRes.json();
+    const userProfile = await spotifyFetch('/me',access_token);
+    const userId = userProfile.id;
+
+    const name = playlist_name || `Energy Curve Playlist `
+  }
+});
