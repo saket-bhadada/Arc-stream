@@ -1,4 +1,4 @@
-import spotifyApi from "./spotifyservice";
+import spotifyApi from "../spotifyservice.js";
 import {Router} from 'express';
 
 const SCOPES = [
@@ -22,18 +22,22 @@ router.get('/callback',async(req,res)=>{
     const {error,code} = req.query;
     if(error){
         console.error('oauth error:',error);
-        res.send(`Callback Error: ${error}`);
+        return res.send(`Callback Error: ${error}`);
     }
 
     try{
         const data = await spotifyApi.authorizationCodeGrant(code);
         const {access_token,refresh_token,expires_in} = data.body;
 
-        const redirect = new URL(process.env.Frontend_URL);
+        const frontendUrl = process.env.FRONTEND_URL;
+        if (!frontendUrl) {
+            console.error('[Login] FRONTEND_URL not set – cannot build redirect URL');
+            return res.status(500).send('Server mis‑configuration');
+        }
+        const redirect = new URL(frontendUrl);
         redirect.searchParams.set('access_token',access_token);
         redirect.searchParams.set('refresh_token',refresh_token);
         redirect.searchParams.set('expires_in',expires_in);
-
         res.redirect(redirect.toString());
     }catch(err){
         console.error('Error getting Tokens:',err);

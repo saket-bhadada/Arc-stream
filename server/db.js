@@ -5,7 +5,7 @@ dotenv.config();
 
 const {Pool} = pg;
 
-const REQUIRED =['DB_HOST','DB_PORT','DB_NAME','DB_USER','DB_PASSWORD']
+const REQUIRED =['DB_HOST','DB_PORT','DB_DATABASE','DB_USER','DB_PASSWORD']
 const missing = REQUIRED.filter((key)=>!process.env[key]);
 if(missing.length>0){
     throw new Error(
@@ -17,7 +17,7 @@ if(missing.length>0){
 const db = new pg.Pool({
     host: process.env.DB_HOST,
     port: process.env.DB_PORT,
-    database: process.env.DB_NAME,
+    database: process.env.DB_DATABASE,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
 
@@ -31,7 +31,7 @@ db.on('error',(err)=>{
 });
 
 db.connect()
-.then(()=>{
+.then((client)=>{
     console.log('[DB] Connected');
     client.release();
 })

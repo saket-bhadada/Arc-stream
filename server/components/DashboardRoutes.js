@@ -2,27 +2,27 @@ import { Router } from "express";
 import db from '../db.js';
 
 const router = Router();
-const ML_BASE = process.env.ML_BASE||'http://localhost:8000';
+const ML_BASE = process.env.ML_BASE || 'http://localhost:8000';
 const SPOTIFY_BASE = 'http://api.spotify.com/v1';
 
-const spotifyFetch = async(path,accessToken,options={})=>{
-  const res = await fetch(`${SPOTIFY_BASE}${path}`,{
+const spotifyFetch = async (path, accessToken, options = {}) => {
+  const res = await fetch(`${SPOTIFY_BASE}${path}`, {
     ...options,
-    headers:{
-      'Authorization':`Bearer${accessToken}`,
-      'Content_type':'application/json',
+    headers: {
+      'Authorization': `Bearer${accessToken}`,
+      'Content_type': 'application/json',
       ...options.headers,
     }
   });
-  if(res.status===204) return null;
-  if(!res.ok){
+  if (res.status === 204) return null;
+  if (!res.ok) {
     throw new Error(`Spotify ${res.status} on ${path}: ${body}`);
   }
 
   return res.json();
 };
 
-router.post('/buffer',async(req,res)=>{
+router.post('/buffer', async (req, res) => {
   const {
     session_id,
     access_token,
@@ -30,21 +30,21 @@ router.post('/buffer',async(req,res)=>{
     session_history,
     current_z_sequence,
   } = req.body;
-  
-  if(!access_token) {
-    return res.status(401).json({error:'Missing access token'})
+
+  if (!access_token) {
+    return res.status(401).json({ error: 'Missing access token' })
   }
 
-  if(!current_z_sequence||(current_z_sequence.length<5&&current_z_sequence.length>9)) {
+  if (!current_z_sequence || (current_z_sequence.length < 5 && current_z_sequence.length > 9)) {
     return res.status(400).json({
-      error:'current_z_sequence must be an array of 5 to 9 z-vector'
+      error: 'current_z_sequence must be an array of 5 to 9 z-vector'
     })
   }
-  try{
-    const mlRes = await fetch(`${ML_BASE}/predict_buffer`,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
+  try {
+    const mlRes = await fetch(`${ML_BASE}/predict_buffer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         target_energy,
@@ -52,13 +52,13 @@ router.post('/buffer',async(req,res)=>{
         current_z_sequence,
       }),
     });
-    if(!mlRes.ok) {
+    if (!mlRes.ok) {
       const mlErr = await mlRes.text();
       throw new Error(`FastApi /predict_buffer ${mlRes.status}: ${mlErr}`);
     }
-    const {tracks} = await mlRes.json();
+    const { tracks } = await mlRes.json();
 
-    for(const track of tracks) {
+    for (const track of tracks) {
       await spotifyFetch(
         `/me/player/queue?uri=${encodeURIComponent(`spotify:track:${track.track_id}`)}`,
         access_token,
@@ -66,7 +66,7 @@ router.post('/buffer',async(req,res)=>{
       );
     }
 
-    for(const track of tracks) {
+    for (const track of tracks) {
       await db.query(
         `INSERT INTO prediction_history
            (session_id, target_energy, predicted_vector, recommended_track_id, created_at)
@@ -85,14 +85,14 @@ router.post('/buffer',async(req,res)=>{
       `queued ${tracks.length} tracks at energy ${target_energy}`
     );
 
-    res.json({success:true,tracks});
-  }catch(err){
+    res.json({ success: true, tracks });
+  } catch (err) {
     console.error('[Buffer] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/playList',async(req,res)=>{
+router.post('/playList', async (req, res) => {
   const {
     access_token,
     energy_curve,
@@ -101,24 +101,24 @@ router.post('/playList',async(req,res)=>{
     playlist_name,
   } = req.body;
 
-  if(!access_token) {
-    return res.status(401).json({error:'Missing access token'})
+  if (!access_token) {
+    return res.status(401).json({ error: 'Missing access token' })
   }
   // if(!current_z_sequence||(current_z_sequence.length<5&&current_z_sequence.length>9)) {
   //   return res.status(400).json({
   //     error:'current_z_sequence must be an array of 5 to 9 z-vector'
   //   })
   // }
-  if(!energy_curve||!energy_curve.length) {
+  if (!energy_curve || !energy_curve.length) {
     return res.status(400).json({
-      error:'energy_curve must be an array of energy values'
+      error: 'energy_curve must be an array of energy values'
     })
   }
-  try{
-    const mlRes = await fetch(`${ML_BASE}/generate_playlist`,{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
+  try {
+    const mlRes = await fetch(`${ML_BASE}/generate_playlist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         energy_curve,
@@ -127,46 +127,88 @@ router.post('/playList',async(req,res)=>{
       }),
     });
 
-    if(!mlRes.ok) {
+    if (!mlRes.ok) {
       const mlErr = await mlRes.text();
       throw new Error(`FastApi /generate_playlist ${mlRes.status}: ${mlErr}`);
     }
 
-    const {tracks} = await mlRes.json();
-    const userProfile = await spotifyFetch('/me',access_token);
+    const { tracks } = await mlRes.json();
+    const userProfile = await spotifyFetch('/me', access_token);
     const userId = userProfile.id;
 
     const name = playlist_name || `Arc-Stream Mix ${new Date().toLocaleDateString(
-      'en-US',{month:'short',day:'numeric',
-        hour:'numeric',minute:'numeric'
-      }
+      'en-US', {
+        month: 'short', day: 'numeric',
+      hour: 'numeric', minute: 'numeric'
+    }
     )}`;
 
     const newPlaylist = await spotifyFetch(
       `/users/${userId}/playlists`,
       access_token,
       {
-        method:'POST',
-        body:JSON.stringify({
+        method: 'POST',
+        body: JSON.stringify({
           name,
           description: `Generated by Arc-Stream AI · Energy: [${energy_curve.join(', ')}]`,
-          public:false}),
-      
+          public: false
+        }),
+
       }
     );
 
-    const uris = tracks.map(track=>`spotify:track:${track.track_id}`);
+    const uris = tracks.map(track => `spotify:track:${track.track_id}`);
 
-    for(const uri of uris) {
+    for (const uri of uris) {
       await spotifyFetch(
         `/playLists/${newPlayList.id}/tracks`,
         access_token,
         {
-          method:'POST',
-          body:JSON.stringify({uris:uris.slice(i,i+100)}),
+          method: 'POST',
+          body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
         }
       );
     }
-    
-  }catch(err){}
+    const { rows } = await db.query(
+      `insert into playlist
+      (spotify_playlist_id, name, energy_curve, track_count, created_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       RETURNING id`,
+      [
+        newPlaylist.id,
+        name,
+        JSON.stringify(energy_curve),
+        tracks.length,
+      ]
+    );
+    const { playlistdbid } = rows[0].id;
+
+    for(let i=0;i<tracks.length;i++){
+      await db.query(
+        `insert into playlist_tracks (playlist_id, track_id,position) VALUES ($1, $2, $3)`,
+        [playlistdbid, tracks[i].track_id, i]
+      );
+    }
+
+    console.log(
+      `[Playlist] "${name}" — ` +
+      `${tracks.length} tracks — ` +
+      `seq_len=${current_z_sequence.length} — ` +
+      `Spotify ID: ${newPlaylist.id}`
+    );
+
+    res.json({ 
+      success:      true,
+      playlist_id:  newPlaylist.id,
+      playlist_url: newPlaylist.external_urls?.spotify,
+      name,
+      track_count:  tracks.length,
+      tracks,
+     });
+  } catch (err) {
+    console.error('[Playlist] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
+
+export default router;
