@@ -28,6 +28,7 @@ router.get('/callback',async(req,res)=>{
     try{
         const data = await spotifyApi.authorizationCodeGrant(code);
         const {access_token,refresh_token,expires_in} = data.body;
+        console.log(access_token);
 
         const frontendUrl = process.env.FRONTEND_URL;
         if (!frontendUrl) {
@@ -54,6 +55,7 @@ router.post('/refresh_token',async(req,res)=>{
         spotifyApi.setRefreshToken(refresh_token);
         const data = await spotifyApi.refreshAccessToken();
         const {access_token,expires_in} = data.body;
+        console.log(access_token);
         res.json({access_token,expires_in});
     }catch(err){
         console.error('Error refreshing access token:',err);
