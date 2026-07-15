@@ -73,6 +73,7 @@ router.post('/buffer', async (req, res) => {
          VALUES ($1, $2, $3, $4, NOW())`,
         [
           session_id,
+          userId,
           target_energy,
           JSON.stringify(track.predicted_vector),
           track.track_id,
@@ -171,10 +172,11 @@ router.post('/playList', async (req, res) => {
     }
     const { rows } = await db.query(
       `insert into playlist
-      (spotify_playlist_id, name, energy_curve, track_count, created_at)
+      (user__spotify_id,spotify_playlist_id, name, energy_curve, track_count, created_at)
        VALUES ($1, $2, $3, $4, NOW())
        RETURNING id`,
       [
+        userId,
         newPlaylist.id,
         name,
         JSON.stringify(energy_curve),
