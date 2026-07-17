@@ -1,4 +1,5 @@
 # from importlib.metadata import version
+from random import random
 import random
 from fastapi import FastAPI,HTTPException
 from pydantic import BaseModel
@@ -73,4 +74,42 @@ def health():
 @app.post('/predict_buffer')
 def predict_buffer(payload:BufferRequest):
     seq_len = len(payload.current_z_sequence)
-    
+    if not (MIN_SEQ_LEN <= seq_len <= MAX_SEQ_LEN):
+        raise HTTPException(status_code=400,
+        detail=f'current_z_sequence length must be between '
+                f'{MIN_SEQ_LEN} and {MAX_SEQ_LEN}, got {seq_len}')
+    chosen = random.sample(MOCK_TRACKS,k=3)
+    tracks = [
+        {**track, 'predicted_vector':mock_predicted_vector()}
+        for track in chosen
+    ]
+    return {
+        'tracks':tracks,
+        'seq_len':seq_len,
+    }
+
+@app.post('/generate_playlist')
+def generate_playlist(payload:PlaylistRequest):
+    seq_len = len(payload.current_z_sequence)
+    curve_len = len(payload.energy_curve)
+
+    if not (MIN_SEQ_LEN<=seq_len<=MAX_SEQ_LEN):
+        raise HTTPException(status_code=400,
+        detail=(
+            f'current_z_sequence length must be between '
+            f'{MIN_SEQ_LEN} and {MAX_SEQ_LEN}, got {seq_len}'
+        ))
+    if curve_len == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=('Energy must not be empty')
+        )
+    tracks=[
+        random.choice(MOCK_TRACKS)
+        for _ in range(curve_len)
+    ]
+    return {
+        'tracks':    tracks,
+        'seq_len':   seq_len,
+        'curve_len': curve_len,
+    }

@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     position    INTEGER     NOT NULL,
 
     FOREIGN KEY (playlist_id)
-        REFERENCES playlists (id)
+        REFERENCES playlist (id)
         ON DELETE CASCADE,
 
     UNIQUE (playlist_id, position)

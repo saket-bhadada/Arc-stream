@@ -1,3 +1,13 @@
 server/.env
 server/node_modules/
 client/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+ml-service/.venv/
+ml-service/.env
+
+# Temp helper scripts
+database/run_schema.js
+database/check_vector.js
