@@ -69,3 +69,38 @@ def main():
 
     print('building z_vector string')
     df['z_vector_str'] = df.apply(build_z_vector_str,axis=1)
+
+    print('Connecting to postgresql')
+    conn = get_connected()
+    cur = conn.cursor()
+
+    cur.execute("SELECT extname from pg_extension where extname = 'vector'")
+    if not cur.fetchone():
+        print('[Populate] ERROR — pgvector extension not found in this database.')
+        print('[Populate] Run: CREATE EXTENSION vector;  in psql first.')
+        conn.close()
+        sys.exit(1)
+
+    INSERT_SQL = """
+        insert into track_features
+        (id, track_name, artists,danceability,energy,key,loudness,mode,tempo,valence,z_vector)
+        values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        on conflict (id) do nothing;
+    """
+    rows = [
+        (
+            str(row['id']),
+            str(row['track_name']),
+            str(row['artists']),
+            float(row['danceability']) if pd.notna(row['danceability']) else None,
+            float(row['energy'])       if pd.notna(row['energy'])       else None,
+            int(row['key'])            if pd.notna(row['key'])          else None,
+            float(row['loudness'])     if pd.notna(row['loudness'])     else None,
+            int(row['mode'])           if pd.notna(row['mode'])         else None,
+            float(row['tempo'])        if pd.notna(row['tempo'])        else None,
+            float(row['valence'])      if pd.notna(row['valence'])      else None,
+            row['z_vector_str'],
+        )
+        for _, row in df.iterrows()
+    ]
+    
