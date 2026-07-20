@@ -47,3 +47,25 @@ def get_connected():
         user = os.getenv('DB_USER'),
         password = os.getenv('DB_PASSWORD')
     )
+
+def main():
+    if not os.path.exists(CSV_PATH):
+        print(f'csv not found')
+        sys.exit(1)
+
+    df = pd.read_csv(CSV_PATH)
+    
+    missing_cols = [c for c in REQUIRED if c not in df.columns]
+    if missing_cols:
+        print(f'[Populate] ERROR — CSV missing columns: {missing_cols}')
+        sys.exit(1)
+    df = df[REQUIRED].copy()
+    before = len(df)
+    df = df.dropna(subset=['id']+Z_COLS)
+    df = df.drop_duplicates(subset='id')
+    after = len(df)
+
+    print(f'[Populate] {before:,} rows in CSV → {after:,} after dedup and null drop.')
+
+    print('building z_vector string')
+    df['z_vector_str'] = df.apply(build_z_vector_str,axis=1)
