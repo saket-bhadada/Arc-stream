@@ -1,3 +1,4 @@
+from pandas._typing import ParquetEngine
 import psycopg2
 from os import getenv
 import os
@@ -5,6 +6,7 @@ import sys
 import time
 import pandas as pd
 import psycopg2
+from psycopg2.extras import execute_batch
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__),'../service/.env'))
@@ -103,4 +105,27 @@ def main():
         )
         for _, row in df.iterrows()
     ]
-    
+    total = len(rows)
+    inserted = 0
+    start_time = time.time()
+
+    print(f'Inserting {total:,} rows in batches of {BATCH_SIZE}')
+    for i in range(0,total,BATCH_SIZE):
+        batch = rows[i:1+BATCH_SIZE]
+        execute_batch(cur, INSERT_SQL, batch, page_size=BATCH_SIZE)
+        conn.commit()
+        inserted += len(batch)
+        pct = (inserted/total)*100
+        elapsed = time.time()-start_time
+        print(f'[Populate]   {inserted:,}/{total:,} ({pct:.1f}%) — {elapsed:.1f}s elapsed')
+
+    cur.close()
+    conn.close()
+
+    elapsed = time.time() - start_time
+    print(f'[Populate] Done — {inserted:,} rows in {elapsed:.1f}s.')
+    print('[Populate] track_features is ready for pgvector search.')
+
+
+if __name__ == '__main__':
+    main()

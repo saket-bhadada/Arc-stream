@@ -13,6 +13,17 @@ const SCOPES = [
 
 const router = Router();
 
+const REFRESH_COOKIE_NAME = 'arc_stream_token';
+const REFRESH_COOKIE_MAX_AGE = 90*24*60*60*1000;
+
+const cookieOption = () => ({
+    httpOnly:true,
+    secure:process.env.NODE_ENV==='production',
+    sameSite:'lax',
+    maxAge:REFRESH_COOKIE_MAX_AGE,
+    path:'/',
+});
+
 router.get('/login',(req,res)=>{
     const url = spotifyApi.createAuthorizeURL(SCOPES);
     res.redirect(url);
@@ -30,14 +41,9 @@ router.get('/callback',async(req,res)=>{
         const {access_token,refresh_token,expires_in} = data.body;
         console.log(access_token);
 
-        const frontendUrl = process.env.FRONTEND_URL;
-        if (!frontendUrl) {
-            console.error('[Login] FRONTEND_URL not set – cannot build redirect URL');
-            return res.status(500).send('Server mis‑configuration');
-        }
-        const redirect = new URL(frontendUrl);
+        res.cookie(REFRESH_COOKIE_NAME,refresh_token,cookieOption());
+        const redirect = new URL(process.env.FRONTEND_URL);
         redirect.searchParams.set('access_token',access_token);
-        redirect.searchParams.set('refresh_token',refresh_token);
         redirect.searchParams.set('expires_in',expires_in);
         res.redirect(redirect.toString());
     }catch(err){
@@ -54,13 +60,19 @@ router.post('/refresh_token',async(req,res)=>{
     try{
         spotifyApi.setRefreshToken(refresh_token);
         const data = await spotifyApi.refreshAccessToken();
-        const {access_token,expires_in} = data.body;
+        const {access_token,expires_in,refresh_token:rotated} = data.body;
+        res.cookie(REFRESH_COOKIE_NAME,rotated||refresh_token,cookieOption());
         console.log(access_token);
         res.json({access_token,expires_in});
     }catch(err){
         console.error('Error refreshing access token:',err);
         res.status(500).json({error:'Failed to refresh access token'});
     }
+});
+
+router.post('/logout',(req,res)=>{
+    res.clearCookie(REFRESH_COOKIE_NAME,{path:'/'});
+    res.json({success:true});
 });
 
 export default router;

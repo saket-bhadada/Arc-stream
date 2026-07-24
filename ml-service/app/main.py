@@ -1,8 +1,33 @@
 # from importlib.metadata import version
+from fastapi import datastructures
+import os
 from random import random
 import random
-from fastapi import FastAPI,HTTPException
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+from fastapi import FastAPI,HTTPException,Depends
 from pydantic import BaseModel
+from database_manager import ArcStreamDB
+from app import models,database
+    
+load_dotenv()
+models.Base.metadata.create_all(bind=database.engine)
+arc_db = ArcStreamDB(os.getenv('DATABASE_URL'))
+
+@asynccontextmanager
+async def lifespan(app:FastAPI):
+    await arc_db.connect()
+    try:
+        count = await arc_db.track_count()
+        print(f'[Startup] track_features: {count:,} rows ready for pgvector search.')
+        if count == 0:
+            print('WARNING - TRACK FEATURE EMPTY')
+            print('run database/populate_embeddings.py')
+    except Exception as e:
+        print(e)
+    yield
+
+    await arc_db.disconnect()
 
 # Initialize the FastAPI instance
 app = FastAPI(

@@ -21,6 +21,7 @@ app.use(cors({
   credentials: true,
 }));
 app.use(express.json());
+app.use(cookieParser());
 
 // ── Health check ──────────────────────────────────────────────────────────────
 // Verifies both the server and the DB pool are alive.
@@ -69,4 +70,5 @@ app.listen(PORT, () => {
   console.log(`[Arc-Stream] ML Service    → ${process.env.ML_SERVICE_URL}`);
   console.log(`[Arc-Stream] Environment   → ${process.env.NODE_ENV || 'development'}`);
   console.log(`[Arc-Stream] Z-vector window → MIN=${5} MAX=${9}`);
+  console.log('[Arc-Stream] Session cookie -> 3 month http only refresh token');
 });
