@@ -34,9 +34,9 @@ class ArcStreamDB:
                 '[ArcStreamDB] Pool not initialised. Call connect() first.'
             )
 
-        vector_str = '['+','.join(
-            str(round(float(v),8) for v in predicted_vector)
-        )+']'
+        vector_str = '[' + ','.join(
+            str(round(float(v), 8)) for v in predicted_vector
+        ) + ']'
         fetch_limit = top_k + len(session_history) + 10
         query = """
             SELECT

@@ -1,69 +1,77 @@
-import { useEffect, useRef } from "react";
-import { usePlayerStore } from "../store/playerStore";
+// client/src/pages/DashboardPage.jsx
+import { useEffect, useRef } from 'react';
+import { usePlayerStore } from '../store/playerStore';
 
-const NODE_BASE = import.meta.env.VITE_API_URL||'http://localhost:3000';
-const SPOTIFY_BASE = 'https://api.spotify.com/v1';
+const NODE_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
-const transferPlayback = async(deviceId,accessToken,play=false)=>{
-  const res = await fetch(`${SPOTIFY_BASE}/ME/PLAYER`,{
-    method:'PUT',
-    headers:{'Authorization':'Bearer '+accessToken,
-      'content-type':'application/json',
-    },
-    body:JSON.stringify({device_ids:[deviceId],play}),
+
+// ── Cookie-driven refresh helper ────────────────────────────────────────────
+// No refresh_token argument anymore — the browser attaches the httpOnly
+// cookie automatically. credentials: 'include' is what makes that happen
+// on this cross-origin (5173 → 3000) request.
+const refreshAccessToken = async () => {
+  const res = await fetch(`${NODE_BASE}/refresh`, {
+    method:      'POST',
+    credentials: 'include',
   });
-  if(!res.ok&&res.status!==204){
-    throw new Error(`Transfer Playback failed:${res.status}`);
-  }
-};
-
-const refreshAccessToken = async (refreshToken)=>{
-  const res = await fetch(`${NODE_BASE}/refresh`,{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({refresh_token:refreshToken}),
-  });
-  if(!res.ok) throw new Error('Token refresh failed');
+  if (!res.ok) throw new Error('Token refresh failed');
   return res.json();
 };
 
-// eslint-disable-next-line no-unused-vars
-const addToQueue = async (trackUri, accessToken) => {
-  const res = await fetch(
-    `${SPOTIFY_BASE}/me/player/queue?uri=${encodeURIComponent(trackUri)}`,
-    { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  if (!res.ok) throw new Error(`Add to queue failed: ${res.status}`);
+const logoutRequest = async () => {
+  await fetch(`${NODE_BASE}/logout`, {
+    method:      'POST',
+    credentials: 'include',
+  });
 };
 
-const useSpotifyPlayer = ()=>{
-  const scriptInjected = useRef(false);
 
+// ── Spotify service functions ────────────────────────────────────────────────
+const SPOTIFY_BASE = 'https://api.spotify.com/v1';
+
+const transferPlayback = async (deviceId, accessToken, play = false) => {
+  const res = await fetch(`${SPOTIFY_BASE}/me/player`, {
+    method: 'PUT',
+    headers: {
+      Authorization:  `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ device_ids: [deviceId], play }),
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Transfer playback failed: ${res.status}`);
+  }
+};
+
+
+// ── useSpotifyPlayer hook ─────────────────────────────────────────────────────
+const useSpotifyPlayer = () => {
   const {
     accessToken,
-    setPlayer,setDeviceId,setIsActive,
-    setCurrentTrack, setIsPlaying,setPosition,setDuration,
+    setPlayer, setDeviceId, setIsActive,
+    setCurrentTrack, setIsPlaying, setPosition, setDuration,
     addToHistory,
   } = usePlayerStore();
 
-  useEffect(()=>{
-    if(!accessToken||scriptInjected.current) return;
-    scriptInjected.current = true;
+  useEffect(() => {
+    if (!accessToken) return;
 
-    window.onSpotifyWebPlaybackSDKReady = () => {
+    const initPlayer = () => {
+      // Avoid duplicate player instantiation
+      if (usePlayerStore.getState().player) return;
+
       const player = new window.Spotify.Player({
-        name:'Arc-Stream',
-        getOAuthToken:(callback)=>callback(usePlayerStore.getState().accessToken),
+        name: 'Arc-Stream',
+        getOAuthToken: (cb) => cb(usePlayerStore.getState().accessToken),
         volume: 0.7,
       });
 
-      player.addListener('ready',({device_id})=>{
-        console.log('[Arc-Stream] player ready = device id: '+device_id);
+      player.addListener('ready', ({ device_id }) => {
+        console.log('[Arc-Stream] Player ready — Device ID:', device_id);
         setDeviceId(device_id);
-        setIsActive(true);
       });
 
-      player.addListener('not_ready',({device_id})=>{
+      player.addListener('not_ready', ({ device_id }) => {
         console.warn('[Arc-Stream] Device offline:', device_id);
         setIsActive(false);
       });
@@ -75,40 +83,55 @@ const useSpotifyPlayer = ()=>{
         console.error('[Arc-Stream] Auth error:', message)
       );
       player.addListener('account_error', ({ message }) =>
-        console.error('[Arc-Stream] Account error (Spotify Premium required):', message)
+        console.error('[Arc-Stream] Account error (Premium required):', message)
       );
 
-      player.addListener('player_state_changed',(state)=>{
-        if(!state) return;
+      player.addListener('player_state_changed', (state) => {
+        if (!state) {
+          setIsActive(false);
+          return;
+        }
+        setIsActive(true);
 
-        const {current_track,next_track} = state.track_window;
+        const { current_track, next_tracks } = state.track_window;
 
         setCurrentTrack(current_track);
         setIsPlaying(!state.paused);
         setPosition(state.position);
         setDuration(state.duration);
 
-        if(current_track?.id) addToHistory(current_track.id);
+        if (current_track?.id) addToHistory(current_track.id);
 
-        if(next_track.length<2)
-          console.log('[Arc-Stream] Queue < 2 — buffer refill trigger ready for Phase 4.');
-
+        if (next_tracks.length < 2) {
+          console.log('[Arc-Stream] Queue < 2 — buffer refill trigger ready for Phase 6.');
+        }
       });
 
-      player.connect().then((success)=>{
-        if(success) console.log('[Arc-Stream] Connected to Spotify Web Playback SDK.');
+      player.connect().then((success) => {
+        if (success) console.log('[Arc-Stream] Connected to Spotify Web Playback SDK.');
       });
 
       setPlayer(player);
     };
 
-    const script = document.createElement('script');
-    script.src = 'https://sdk.scdn.co/spotify-player.js';
-    script.async = true;
-    document.body.appendChild(script);
-  },[accessToken]);
+    if (window.Spotify) {
+      initPlayer();
+    } else {
+      window.onSpotifyWebPlaybackSDKReady = initPlayer;
+
+      if (!document.getElementById('spotify-sdk')) {
+        const script = document.createElement('script');
+        script.id    = 'spotify-sdk';
+        script.src   = 'https://sdk.scdn.co/spotify-player.js';
+        script.async = true;
+        document.body.appendChild(script);
+      }
+    }
+  }, [accessToken]);
 };
 
+
+// ── NowPlaying card ───────────────────────────────────────────────────────────
 const NowPlaying = () => {
   const { currentTrack, isPlaying, player } = usePlayerStore();
 
@@ -122,12 +145,10 @@ const NowPlaying = () => {
         ? <img src={albumArt} alt={trackName} style={s.art} />
         : <div style={s.artPlaceholder}>♪</div>
       }
-
       <div style={s.meta}>
         <p style={s.track}>{trackName}</p>
         <p style={s.artist}>{artistName}</p>
       </div>
-
       <div style={s.controls}>
         <button style={s.btn}     onClick={() => player?.previousTrack()}>⏮</button>
         <button style={s.playBtn} onClick={() => player?.togglePlay()}>
@@ -141,36 +162,40 @@ const NowPlaying = () => {
 
 
 // ════════════════════════════════════════════════════════════════════════════
-// DASHBOARD PAGE (the actual page component)
+// DASHBOARD PAGE
 // ════════════════════════════════════════════════════════════════════════════
 const DashboardPage = () => {
-  useSpotifyPlayer(); // 🔌 boots the SDK once
+  useSpotifyPlayer();
 
   const {
     deviceId, isActive,
-    accessToken, refreshToken, expiresAt,
-    updateAccessToken,
+    accessToken, expiresAt,
+    updateAccessToken, clearTokens,
     targetEnergy, setTargetEnergy,
   } = usePlayerStore();
 
-  // Silent token refresh — fires 60 s before expiry
+  // Silent token refresh — no longer keyed on a refreshToken field in state,
+  // just on expiresAt. The cookie backing this call may still be valid
+  // for up to 3 months, so this timer keeps re-arming itself indefinitely
+  // across the whole session as long as the cookie hasn't expired or been cleared.
   useEffect(() => {
-    if (!expiresAt || !refreshToken) return;
+    if (!expiresAt) return;
     const delay = expiresAt - Date.now() - 60_000;
     if (delay <= 0) return;
 
     const timer = setTimeout(async () => {
       try {
-        const { access_token, expires_in } = await refreshAccessToken(refreshToken);
+        const { access_token, expires_in } = await refreshAccessToken();
         updateAccessToken(access_token, expires_in);
         console.log('[Arc-Stream] Access token silently refreshed.');
       } catch (err) {
-        console.error('[Arc-Stream] Silent refresh failed:', err);
+        console.error('[Arc-Stream] Silent refresh failed — session likely expired:', err);
+        clearTokens();
       }
     }, delay);
 
     return () => clearTimeout(timer);
-  }, [expiresAt, refreshToken]);
+  }, [expiresAt]);
 
   const handleActivate = async () => {
     try {
@@ -180,10 +205,15 @@ const DashboardPage = () => {
     }
   };
 
+  const handleLogout = async () => {
+    await logoutRequest();       // clears the 3-month cookie server-side
+    clearTokens();                // clears local access_token/expiresAt
+    window.location.replace('/');
+  };
+
   return (
     <div style={s.page}>
 
-      {/* ── Header ─────────────────────────────────────────────── */}
       <header style={s.header}>
         <span style={s.logo}>ARC-STREAM</span>
         <div style={s.headerRight}>
@@ -191,17 +221,16 @@ const DashboardPage = () => {
             {isActive ? 'LIVE' : deviceId ? 'READY' : 'CONNECTING'}
           </span>
           <span style={s.statusDot(isActive)} />
+          <button style={s.logoutBtn} onClick={handleLogout}>Log out</button>
         </div>
       </header>
 
-      {/* ── Main ───────────────────────────────────────────────── */}
       <main style={s.main}>
         {isActive ? (
           <div style={s.playerView}>
 
             <NowPlaying />
 
-            {/* Energy target — Phase 4: wires to /api/ai/buffer */}
             <div style={s.energyWrap}>
               <div style={s.energyHeader}>
                 <span style={s.energyLabel}>TARGET ENERGY</span>
@@ -220,13 +249,11 @@ const DashboardPage = () => {
                 <span>Mid</span>
                 <span>Hype</span>
               </div>
-              {/* TODO (Phase 4): on slider release, call /api/ai/buffer with new targetEnergy */}
             </div>
 
-            {/* Queue preview placeholder — Phase 4 */}
             <div style={s.queuePlaceholder}>
               <p style={s.queueHint}>
-                Queue preview — available in Phase 4 once FastAPI is connected.
+                Queue preview — available in Phase 6 once FastAPI is connected.
               </p>
             </div>
 
@@ -268,7 +295,7 @@ const s = {
     padding: '20px 40px', borderBottom: '1px solid #111118',
   },
   logo: { fontSize: 13, fontWeight: 800, letterSpacing: '5px', color: '#1DB954' },
-  headerRight: { display: 'flex', alignItems: 'center', gap: 8 },
+  headerRight: { display: 'flex', alignItems: 'center', gap: 14 },
   statusLabel: { fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#6b7280' },
   statusDot: (active) => ({
     width: 8, height: 8, borderRadius: '50%',
@@ -276,13 +303,16 @@ const s = {
     boxShadow: active ? '0 0 8px #1DB954' : 'none',
     transition: 'all 0.4s ease',
   }),
+  logoutBtn: {
+    background: 'none', border: '1px solid #2a2a3a', color: '#6b7280',
+    fontSize: 10, fontWeight: 700, letterSpacing: '1px',
+    padding: '5px 12px', borderRadius: 20, cursor: 'pointer',
+  },
   main: {
     flex: 1, display: 'flex',
     alignItems: 'center', justifyContent: 'center',
     padding: '24px 0',
   },
-
-  // ── Activate state ───────────────────────────────────────────
   activateWrap: {
     display: 'flex', flexDirection: 'column',
     alignItems: 'center', gap: 16,
@@ -296,8 +326,6 @@ const s = {
     border: 'none', padding: '14px 36px', borderRadius: 50,
     fontSize: 13, fontWeight: 800, letterSpacing: '1px', cursor: 'pointer',
   },
-
-  // ── Player state ────────────────────────────────────────────
   playerView: {
     display: 'flex', flexDirection: 'column',
     alignItems: 'center', gap: 32,

@@ -1,9 +1,10 @@
 // client/src/App.jsx
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import DashboardPage from './components/dashboard';
 import { usePlayerStore } from './store/playerStore';
 import LoginPage from './components/login';
-import { useState } from 'react';
+
+const NODE_BASE = import.meta.env.VITE_NODE_BASE ?? 'http://127.0.0.1:3000';
 
 function App() {
   const { accessToken, setTokens } = usePlayerStore();
@@ -15,7 +16,7 @@ function App() {
     const expires_in    = params.get('expires_in');
 
     if (access_token) {
-      setTokens(access_token, refresh_token, parseInt(expires_in, 10));
+      setTokens(access_token, parseInt(expires_in, 10));
       window.history.replaceState({}, document.title, '/');
       setCheckingSession(false);
       return;
@@ -32,6 +33,7 @@ function App() {
       }).finally(()=>setCheckingSession(false));
   }, []);
 
+  if (checkingSession) return null;
   return accessToken ? <DashboardPage /> : <LoginPage />;
 }
 

@@ -4,12 +4,10 @@ export const usePlayerStore = create((set) => ({
 
   // ─── AUTH ─────────────────────────────────────────────────────────────────
   accessToken:  null,
-  refreshToken: null,
   expiresAt:    null,
 
-  setTokens: (accessToken, refreshToken, expiresIn) => set({
+  setTokens: (accessToken, expiresIn) => set({
     accessToken,
-    refreshToken,
     expiresAt: Date.now() + expiresIn * 1000,
   }),
 
@@ -18,7 +16,7 @@ export const usePlayerStore = create((set) => ({
     expiresAt: Date.now() + expiresIn * 1000,
   }),
 
-  clearTokens: () => set({ accessToken: null, refreshToken: null, expiresAt: null }),
+  clearTokens: () => set({ accessToken: null, expiresAt: null }),
 
   // ─── SPOTIFY WEB PLAYBACK SDK ─────────────────────────────────────────────
   player:   null,

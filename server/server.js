@@ -2,6 +2,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import cookieParser from 'cookie-parser';
 
 // ── DB imported first ─────────────────────────────────────────────────────────
 // db.js runs pool.connect() on import and calls process.exit(1) on failure.
@@ -48,7 +49,7 @@ app.get('/health', async (req, res) => {
 });
 
 // ── Route mounting ────────────────────────────────────────────────────────────
-app.use('/',       loginRoutes);      // GET  /login  /callback   POST /refresh_token
+app.use('/',       loginRoutes);      // GET  /login  /callback   POST /refresh
 app.use('/api/ai', dashboardRoutes);  // POST /api/ai/buffer      POST /api/ai/playlist
 
 // ── Global error handler ──────────────────────────────────────────────────────

@@ -7,11 +7,9 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI,HTTPException,Depends
 from pydantic import BaseModel
-from database_manager import ArcStreamDB
-from app import models,database
+from app.database_manager import ArcStreamDB
     
 load_dotenv()
-models.Base.metadata.create_all(bind=database.engine)
 arc_db = ArcStreamDB(os.getenv('DATABASE_URL'))
 
 @asynccontextmanager

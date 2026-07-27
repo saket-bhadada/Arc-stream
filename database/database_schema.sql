@@ -14,7 +14,7 @@ create table if not exists track_features(
 
 create index if not exists track_features_z_vector_idx
 on track_features
-using hnsw (z_vector vector_12_ops)
+using hnsw (z_vector vector_l2_ops)
 with (m=16,ef_construction=64);
 
 CREATE TABLE IF NOT EXISTS prediction_history (

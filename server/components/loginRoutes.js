@@ -52,21 +52,21 @@ router.get('/callback',async(req,res)=>{
     }
 });
 
-router.post('/refresh_token',async(req,res)=>{
-    const {refresh_token} = req.body;
-    if(!refresh_token){
-        return res.status(400).json({error:'Missing refresh_token in request body'});
+router.post('/refresh', async (req, res) => {
+    const refresh_token = req.cookies[REFRESH_COOKIE_NAME];
+    if (!refresh_token) {
+        return res.status(401).json({ error: 'Missing refresh token cookie' });
     }
-    try{
+    try {
         spotifyApi.setRefreshToken(refresh_token);
         const data = await spotifyApi.refreshAccessToken();
-        const {access_token,expires_in,refresh_token:rotated} = data.body;
-        res.cookie(REFRESH_COOKIE_NAME,rotated||refresh_token,cookieOption());
+        const { access_token, expires_in, refresh_token: rotated } = data.body;
+        res.cookie(REFRESH_COOKIE_NAME, rotated || refresh_token, cookieOption());
         console.log(access_token);
-        res.json({access_token,expires_in});
-    }catch(err){
-        console.error('Error refreshing access token:',err);
-        res.status(500).json({error:'Failed to refresh access token'});
+        res.json({ access_token, expires_in });
+    } catch (err) {
+        console.error('Error refreshing access token:', err);
+        res.status(500).json({ error: 'Failed to refresh access token' });
     }
 });
 
