@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from dotenv import load_dotenv
 
-from app import models, database
-from app.database_manager import ArcStreamDB
+import models, database
+from database_manager import ArcStreamDB
 
 load_dotenv()
 
