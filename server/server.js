@@ -4,9 +4,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import cookieParser from 'cookie-parser';
 
-// ── DB imported first ─────────────────────────────────────────────────────────
-// db.js runs pool.connect() on import and calls process.exit(1) on failure.
-// Importing before Express guarantees no route ever runs against a broken pool.
 import db from './db.js';
 
 import loginRoutes from './components/loginRoutes.js';
@@ -24,9 +21,6 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-// ── Health check ──────────────────────────────────────────────────────────────
-// Verifies both the server and the DB pool are alive.
-// FastAPI also exposes /health — both can be polled by a load balancer.
 app.get('/health', async (req, res) => {
   try {
     await db.query('SELECT 1');
@@ -48,13 +42,10 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// ── Route mounting ────────────────────────────────────────────────────────────
-app.use('/',       loginRoutes);      // GET  /login  /callback   POST /refresh
-app.use('/api/ai', dashboardRoutes);  // POST /api/ai/buffer      POST /api/ai/playlist
+app.use('/',       loginRoutes);     
+app.use('/api/ai', dashboardRoutes); 
 
-// ── Global error handler ──────────────────────────────────────────────────────
-// Catches any error passed via next(err) from route handlers.
-// Hides stack traces from API responses in production.
+
 app.use((err, req, res, next) => {
   console.error('[Server] Unhandled error:', err.message);
   res.status(500).json({
