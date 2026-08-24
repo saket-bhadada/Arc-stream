@@ -88,3 +88,16 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 
 CREATE INDEX IF NOT EXISTS playlist_tracks_order_idx
     ON playlist_tracks (playlist_id, position);
+
+
+-- Phase 7 fix: z_vector was declared vector(33) but populate_db.py only ever
+-- built 32 dimensions. Energy is a per-request target, not a track attribute —
+-- it doesn't belong baked into a static row. Safe to run since track_features
+-- has not yet been successfully populated (the 33-dim declaration would have
+-- rejected every insert).
+DROP INDEX IF EXISTS track_features_z_vector_idx;
+ALTER TABLE track_features ALTER COLUMN z_vector TYPE vector(32);
+CREATE INDEX IF NOT EXISTS track_features_z_vector_idx
+    ON track_features
+    USING hnsw (z_vector vector_l2_ops)
+    WITH (m = 16, ef_construction = 64);
