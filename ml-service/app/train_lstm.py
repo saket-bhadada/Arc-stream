@@ -68,5 +68,32 @@ class SequenceDataset(Dataset):
 
 
 def main():
-    if not os.path.exists(WEIGHTS_PATH):
-        print
+    if not os.path.exists(CSV_PATH):
+        print(f'[Train] ERROR CSV not found at {CSV_PATH}')
+        sys.exit(1)
+
+    print(f'[Train] Loading weights from {CSV_PATH}')
+    df = pd.read_csv(CSV_PATH)
+    missing = [c for c in df.columns if c not in df.columns]
+    if missing:
+        print(f'[Train] ERROR — CSV missing columns: {missing}')
+        print('[Train] Update FEATURE_COLS in app/config.py to match your CSV header.')
+        sys.exit(1)
+    df = df.dropna(subset=FEATURE_COLS)
+    dataset = SequenceDataset(df,seq_len=SEQ_LEN)
+    print(f'[Train] {len(dataset):,} training windows built (seq_len={SEQ_LEN}).')
+
+    if len(dataset) < 10:
+        print('[Train] ERROR — too few windows to train. Check dataset.csv row count.')
+        sys.exit(1)
+
+    val_size = max(1,int(len(dataset)*0.1))
+    train_size = len(dataset) - val_size
+    train_ds, val_ds = random_split(dataset,[train_size,val_size])
+    train_loader = DataLoader(train_ds,batch_size=BATCH_SIZE,shuffle=True)
+    val_loader = DataLoader(val_ds,batch_size=BATCH_SIZE,shuffle=False)
+    model = ArcStreamLSTM().to(DEVICE)
+    criterion = nn.MSELoss()
+    optimizer = AdamW(model.parameters(),lr=LR)
+    scheduler = ReduceLROnPlateau(optimizer,mode='min',factor=0.5,patience=3)
+    best_val_loss = float('inf')
