@@ -6,9 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim import AdamW
-from torch.optim.lr_sechduler import ReduceLROnPlateau
-
-from database.populate_db import BATCH_SIZE
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 # sys.path.insert(0,os.path.join(os.path.dirname(__file__),'..'))
 
 from model_arch import ArcStreamLSTM
@@ -49,17 +47,16 @@ class SequenceDataset(Dataset):
                 continue
             for i in range(n-self.seq_len):
                 windows_feats = feats[i:i+self.seq_len]
-                taget_energy = energy[i:i+self.seq_len]
-                window_energy = np.full((self.seq_len,),target_energy=taget_energy,dtype=np.float32)
-                x = np.concatenate([windows_feats, window_energy[:None]],axis=1)
+                window_energy = energy[i:i + self.seq_len]
+                x = np.concatenate([windows_feats, window_energy[:, None]], axis=1)
                 y = feats[i+self.seq_len]
                 X_list.append(x)
                 y_list.append(y)
 
-            return (
-                torch.tensor(np.stack(X_list),dtype=torch.float32),
-                torch.tensor(np.stack(y_list),dtype=torch.float32)
-            )
+        return (
+            torch.tensor(np.stack(X_list),dtype=torch.float32),
+            torch.tensor(np.stack(y_list),dtype=torch.float32)
+        )
 
     def __len__(self):
         return len(self.X)
@@ -74,7 +71,7 @@ def main():
 
     print(f'[Train] Loading weights from {CSV_PATH}')
     df = pd.read_csv(CSV_PATH)
-    missing = [c for c in df.columns if c not in df.columns]
+    missing = [c for c in FEATURE_COLS if c not in df.columns]
     if missing:
         print(f'[Train] ERROR — CSV missing columns: {missing}')
         print('[Train] Update FEATURE_COLS in app/config.py to match your CSV header.')
@@ -97,3 +94,37 @@ def main():
     optimizer = AdamW(model.parameters(),lr=LR)
     scheduler = ReduceLROnPlateau(optimizer,mode='min',factor=0.5,patience=3)
     best_val_loss = float('inf')
+    os.makedirs(os.path.dirname(WEIGHTS_PATH),exist_ok=True)
+    for epoch in range(1,EPOCHS+1):
+        model.train()
+        train_loss = 0.0
+        for x_batch,y_batch in train_loader:
+            x_batch, y_batch = x_batch.to(DEVICE), y_batch.to(DEVICE)
+            optimizer.zero_grad()
+            pred = model(x_batch)
+            loss = criterion(pred,y_batch)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for x_batch,y_batch in val_loader:
+                x_batch,y_batch = x_batch.to(DEVICE), y_batch.to(DEVICE)
+                pred = model(x_batch)
+                val_loss += criterion(pred,y_batch).item()
+        val_loss /= len(val_loader)
+        scheduler.step(val_loss)
+        lr_now = optimizer.param_groups[0]['lr']
+        print(f'[Train] Epoch {epoch:3d}/{EPOCHS} — train_loss={train_loss:.6f}  val_loss={val_loss:.6f}  lr={lr_now:.2e}')
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(),WEIGHTS_PATH)
+            print(f'[Train]   -> new best — saved to {WEIGHTS_PATH}')
+    print(f'[Train] Done. Best val_loss={best_val_loss:.6f}. Weights at {WEIGHTS_PATH}')
+
+
+if __name__ == '__main__':
+    main()
