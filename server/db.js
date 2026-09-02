@@ -1,74 +1,51 @@
-import pg from 'pg';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import dotenv from 'dotenv';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
 
 dotenv.config();
 
-const {Pool} = pg;
-
-const REQUIRED =['DB_HOST','DB_PORT','DB_DATABASE','DB_USER','DB_PASSWORD']
-const missing = REQUIRED.filter((key)=>!process.env[key]);
-if(missing.length>0){
-    throw new Error(
-        `[DB] Missing environment variables: ${missing.join(', ')}
-        check ./env file`
-    );
+const databaseName = process.env.DB_DATABASE || process.env.DB_NAME;
+const required = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD'];
+const missing = required.filter((key) => !process.env[key]);
+if (!databaseName) missing.push('DB_DATABASE or DB_NAME');
+if (missing.length) {
+  throw new Error(`[DB] Missing environment variables: ${missing.join(', ')}`);
 }
 
 const db = new pg.Pool({
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT,
-    database: process.env.DB_DATABASE,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-
-    max:                     parseInt(process.env.DB_MAX_CONNECTIONS, 10)      || 10,
-    idleTimeoutMillis:       parseInt(process.env.DB_IDLE_TIMEOUT_MS, 10)      || 30_000,
-    connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS, 10) || 5_000,
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT),
+  database: databaseName,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  max: Number.parseInt(process.env.DB_MAX_CONNECTIONS, 10) || 10,
+  idleTimeoutMillis: Number.parseInt(process.env.DB_IDLE_TIMEOUT_MS, 10) || 30_000,
+  connectionTimeoutMillis: Number.parseInt(process.env.DB_CONNECTION_TIMEOUT_MS, 10) || 5_000,
 });
-const initializeDatabase = async () => {
-    try{
-        const __filename = fileURLToPath(import.meta.url);
-        const __dirname = path.dirname(__filename);
 
-        const sqlFilePath = path.join(__dirname,'../database/database_schema.sql');
-        const sqlContent = fs.readFileSync(sqlFilePath,'utf-8');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const schemaPath = path.join(__dirname, '../database/database_schema.sql');
 
-        try {
-            await db.query(sqlContent);
-            console.log('[DB] Schema created/verified successfully (all tables)');
-        } catch (err) {
-            // pgvector not installed — skip vector-related SQL
-            if (err.message.includes('vector')) {
-                console.warn('[DB] ⚠ pgvector not available — skipping track_features table');
-                const nonVectorSql = sqlContent
-                    .replace(/create\s+extension\s+if\s+not\s+exists\s+vector\s*;/i, '')
-                    .replace(/create\s+table\s+if\s+not\s+exists\s+track_features[\s\S]*?;\s*/i, '')
-                    .replace(/create\s+index\s+if\s+not\s+exists\s+track_features_z_vector_idx[\s\S]*?;\s*/i, '');
-                await db.query(nonVectorSql);
-                console.log('[DB] Schema created/verified (without vector tables)');
-            } else {
-                throw err;
-            }
-        }
-    }catch(err){
-        console.error('[DB] Failed to create/verify schema: ',err.message);
+export const databaseReady = (async () => {
+  const client = await db.connect();
+  try {
+    await client.query(fs.readFileSync(schemaPath, 'utf8'));
+    console.log('[DB] Schema verified successfully.');
+  } catch (error) {
+    if (error.message.includes('vector')) {
+      throw new Error(`[DB] pgvector is required for Arc-Stream recommendations: ${error.message}`);
     }
-}
-db.on('error',(err)=>{
-    console.error('[DB] Unexpected error: ',err.message);
+    throw error;
+  } finally {
+    client.release();
+  }
+})();
+
+db.on('error', (error) => {
+  console.error('[DB] Unexpected pool error:', error.message);
 });
 
-db.connect()
-.then(async (client)=>{
-    console.log('[DB] Connected');
-    client.release();
-    await initializeDatabase();
-})
-.catch((err)=>{
-    console.error('[DB] Failed to connect: ',err.message);
-    process.exit(1);
-});
 export default db;

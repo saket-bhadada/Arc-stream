@@ -42,9 +42,17 @@ export const usePlayerStore = create((set) => ({
   sessionHistory:   [],
   currentZSequence: [],
   targetEnergy:     0.5,
+  sessionId:        null,
 
-  addToHistory:        (trackId)  => set((s) => ({ sessionHistory: [...s.sessionHistory, trackId] })),
+  appendDatasetTrack: (trackId, vector) => set((state) => {
+    if (state.sessionHistory.at(-1) === trackId) return state;
+    return {
+      sessionHistory: [...state.sessionHistory, trackId].slice(-200),
+      currentZSequence: [...state.currentZSequence, vector].slice(-9),
+    };
+  }),
+  setSessionId: (sessionId) => set({ sessionId }),
   setCurrentZSequence: (sequence) => set({ currentZSequence: sequence }),
   setTargetEnergy:     (energy)   => set({ targetEnergy: energy }),
-  resetSession: () => set({ sessionHistory: [], currentZSequence: [] }),
+  resetSession: () => set({ sessionId: null, sessionHistory: [], currentZSequence: [] }),
 }));

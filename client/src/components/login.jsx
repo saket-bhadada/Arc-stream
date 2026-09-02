@@ -1,6 +1,8 @@
 // client/src/pages/LoginPage.jsx
 
 
+const NODE_BASE = import.meta.env.VITE_NODE_BASE || 'http://localhost:3000';
+
 const LoginPage = () => (
   <div style={s.page}>
     <div style={s.badge}>AI DJ SYSTEM</div>
@@ -11,7 +13,7 @@ const LoginPage = () => (
       and charts smooth transitions across 114,000 tracks.
     </p>
 
-    <a href="http://127.0.0.1:3000/login" style={s.btn}>
+    <a href={`${NODE_BASE}/login`} style={s.btn}>
       CONNECT WITH SPOTIFY PREMIUM
     </a>
 

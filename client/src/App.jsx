@@ -12,13 +12,14 @@ function App() {
   useEffect(() => {
     const params        = new URLSearchParams(window.location.search);
     const access_token  = params.get('access_token');
-    const refresh_token = params.get('refresh_token');
     const expires_in    = params.get('expires_in');
 
-    if (access_token) {
-      setTokens(access_token, parseInt(expires_in, 10));
-      window.history.replaceState({}, document.title, '/');
-      setCheckingSession(false);
+    if (access_token && expires_in) {
+      Promise.resolve().then(() => {
+        setTokens(access_token, parseInt(expires_in, 10));
+        window.history.replaceState({}, document.title, '/');
+        setCheckingSession(false);
+      });
       return;
     }
     fetch(`${NODE_BASE}/refresh`,{
@@ -31,7 +32,7 @@ function App() {
       .catch(()=>{
 
       }).finally(()=>setCheckingSession(false));
-  }, []);
+  }, [setTokens]);
 
   if (checkingSession) return null;
   return accessToken ? <DashboardPage /> : <LoginPage />;

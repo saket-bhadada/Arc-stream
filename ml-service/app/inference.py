@@ -1,35 +1,57 @@
-import os
+"""Load trained weights and turn a feature sequence into a next-track vector."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence
+
 import torch
-from typing import List,Optional
-from model_arch import ArcStreamLSTM
-from config import LATENT_DIM
+
+from app.config import FEATURE_COLS, LATENT_DIM
+from app.model_arch import ArcStreamLSTM
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-_model_cache: Optional[ArcStreamLSTM] = None
+_model_cache: ArcStreamLSTM | None = None
 
-def load_model(weights_path:str)->ArcStreamLSTM:
+
+def load_model(weights_path: str | Path) -> ArcStreamLSTM | None:
+    """Load trained weights, returning ``None`` when training has not run yet."""
     global _model_cache
     if _model_cache is not None:
         return _model_cache
-    model = ArcStreamLSTM().to(DEVICE)
 
-    if os.path.exists(weights_path):
-        model.load_state_dict(torch.load(weights_path,map_location=DEVICE))
-    else:
-        print(f'[Inference] WARNING — no weights at {weights_path}')
+    path = Path(weights_path)
+    if not path.is_file():
+        print(f"[Inference] No trained weights at {path}; using energy-matching fallback.")
+        return None
+
+    model = ArcStreamLSTM().to(DEVICE)
+    state_dict = torch.load(path, map_location=DEVICE, weights_only=True)
+    model.load_state_dict(state_dict)
     model.eval()
     _model_cache = model
     return model
 
-def predict_next_latent_vector(model,sequence_history:List[List[float]],target_energy:float)->List[float]:
+
+def predict_next_latent_vector(
+    model: ArcStreamLSTM | None,
+    sequence_history: Sequence[Sequence[float]],
+    target_energy: float,
+) -> list[float]:
+    """Predict the next vector, or use the last vector with target energy set."""
     if not sequence_history:
-        raise ValueError('sequence_history must contain at least one element')
-    if any(len(v) != LATENT_DIM for v in sequence_history):
-        raise ValueError(f'Every vector in sequence_history must be {LATENT_DIM}-dimensional')
+        raise ValueError("sequence_history must contain at least one vector")
+    if any(len(vector) != LATENT_DIM for vector in sequence_history):
+        raise ValueError(f"Every vector in sequence_history must be {LATENT_DIM}-dimensional")
 
-    augmented = [[*v,target_energy] for v in sequence_history]
-    x = torch.tensor(augmented,dtype=torch.float32).to(DEVICE).unsqueeze(0)
+    if model is None:
+        prediction = list(sequence_history[-1])
+        prediction[FEATURE_COLS.index("energy")] = target_energy
+        return prediction
 
+    augmented = [[*vector, target_energy] for vector in sequence_history]
+    inputs = torch.tensor(augmented, dtype=torch.float32, device=DEVICE).unsqueeze(0)
     with torch.no_grad():
-        prediction = model(x)
-    return prediction.sequeeze(0).cpu().tolist()
+        prediction = model(inputs).sequeeze(0).cpu().tolist()
+
+    return [max(0.0, min(1.0, float(value))) for value in prediction]

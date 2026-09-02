@@ -11,3 +11,5 @@ ml-service/.env
 # Temp helper scripts
 database/run_schema.js
 database/check_vector.js
+
+ml-service/training/archive/tracks_features.csv

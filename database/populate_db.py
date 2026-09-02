@@ -1,138 +1,128 @@
-import psycopg2
-from os import getenv
+"""Populate ``track_features`` from the ML service training dataset."""
+
+from __future__ import annotations
+
 import os
 import sys
 import time
-import random
+from pathlib import Path
+from typing import Final
+
 import pandas as pd
-from psycopg2.extras import execute_batch
+import psycopg2
 from dotenv import load_dotenv
+from psycopg2.extensions import connection as PgConnection
+from psycopg2.extras import execute_batch
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '../server/.env'))
+PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
+ML_SERVICE_DIR: Final = PROJECT_ROOT / "ml-service"
+CSV_PATH: Final = ML_SERVICE_DIR / "training" / "archive" / "tracks_features.csv"
+BATCH_SIZE: Final = 500
 
-CSV_PATH = os.path.join(
-    os.path.dirname(__file__),
-    '../ml-service/training/dataset.csv'
-)
-BATCH_SIZE = 500
+# The ML service directory is not an installable Python package (its name contains
+# a hyphen), so add it before importing the shared normalization implementation.
+if str(ML_SERVICE_DIR) not in sys.path:
+    sys.path.insert(0, str(ML_SERVICE_DIR))
 
-# Columns we actually require from the Kaggle dataset.csv
-# 'track_id' is mapped to 'id' in our table
-CSV_COLS = [
-    'track_id',
-    'track_name',
-    'artists',
-    'danceability',
-    'energy',
-    'key',
-    'loudness',
-    'mode',
-    'tempo',
-    'valence'
-]
+from app.config import FEATURE_COLS  # noqa: E402
+from app.feature_utils import normalize_row  # noqa: E402
 
-def generate_mock_z_vector(track_id: str) -> str:
-    # Deterministically generate a 33-dimensional float vector using track_id as seed
-    rng = random.Random(track_id)
-    vector = [rng.random() for _ in range(33)]
-    return '[' + ','.join(f"{v:.8f}" for v in vector) + ']'
+load_dotenv(PROJECT_ROOT / "server" / ".env")
 
-def get_connected():
-    db_name = getenv('DB_DATABASE') or getenv('DB_NAME')
-    required_env = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD']
-    missing = [k for k in required_env if not getenv(k)]
-    if not db_name:
-        missing.append('DB_DATABASE or DB_NAME')
+# tracks_features.csv uses Spotify's ``id`` and ``name`` column names.
+ID_COL: Final = "id"
+NAME_COL: Final = "name"
+ARTIST_COL: Final = "artists"
+REQUIRED_COLUMNS: Final = [ID_COL, NAME_COL, ARTIST_COL, *FEATURE_COLS]
+
+INSERT_SQL: Final = """
+    INSERT INTO track_features
+        (id, track_name, artists, danceability, energy, key, loudness, mode, tempo, valence, z_vector)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO NOTHING;
+"""
+
+
+def get_connection() -> PgConnection:
+    """Return a configured database connection, or stop with a clear error."""
+    database_name = os.getenv("DB_DATABASE") or os.getenv("DB_NAME")
+    required_env = ("DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD")
+    missing = [key for key in required_env if not os.getenv(key)]
+    if not database_name:
+        missing.append("DB_DATABASE or DB_NAME")
     if missing:
-        print(f'[Populate] ERROR — missing env vars: {", ".join(missing)}')
-        print('[Populate] Make sure server/.env exists with DB_* variables.')
-        sys.exit(1)
-    
+        raise SystemExit(f"[Populate] ERROR - missing env vars: {', '.join(missing)}")
+
     return psycopg2.connect(
-        host=os.getenv('DB_HOST'),
-        port=int(getenv('DB_PORT')),
-        dbname=db_name,
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD')
+        host=os.environ["DB_HOST"],
+        port=int(os.environ["DB_PORT"]),
+        dbname=database_name,
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
     )
 
-def main():
-    if not os.path.exists(CSV_PATH):
-        print(f'csv not found: {CSV_PATH}')
-        sys.exit(1)
 
-    df = pd.read_csv(CSV_PATH)
-    
-    missing_cols = [c for c in CSV_COLS if c not in df.columns]
-    if missing_cols:
-        print(f'[Populate] ERROR — CSV missing columns: {missing_cols}')
-        sys.exit(1)
-        
-    df = df[CSV_COLS].copy()
-    before = len(df)
-    # Drop rows where critical track identifying information is null
-    df = df.dropna(subset=['track_id', 'track_name', 'artists'])
-    df = df.drop_duplicates(subset='track_id')
-    after = len(df)
-
-    print(f'[Populate] {before:,} rows in CSV -> {after:,} after dedup and null drop.')
-
-    print('Connecting to postgresql')
-    conn = get_connected()
-    cur = conn.cursor()
-
-    cur.execute("SELECT extname from pg_extension where extname = 'vector'")
-    if not cur.fetchone():
-        print('[Populate] ERROR — pgvector extension not found in this database.')
-        print('[Populate] Run: CREATE EXTENSION vector;  in psql first.')
-        conn.close()
-        sys.exit(1)
-
-    INSERT_SQL = """
-        insert into track_features
-        (id, track_name, artists, danceability, energy, key, loudness, mode, tempo, valence, z_vector)
-        values(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        on conflict (id) do nothing;
-    """
-    
-    print('Preparing database rows...')
-    rows = [
+def build_rows(dataframe: pd.DataFrame) -> list[tuple[object, ...]]:
+    """Convert dataset rows to parameter tuples accepted by ``execute_batch``."""
+    return [
         (
-            str(row['track_id']),
-            str(row['track_name']),
-            str(row['artists']),
-            float(row['danceability']) if pd.notna(row['danceability']) else None,
-            float(row['energy'])       if pd.notna(row['energy'])       else None,
-            int(row['key'])            if pd.notna(row['key'])          else None,
-            float(row['loudness'])     if pd.notna(row['loudness'])     else None,
-            int(row['mode'])           if pd.notna(row['mode'])         else None,
-            float(row['tempo'])        if pd.notna(row['tempo'])        else None,
-            float(row['valence'])      if pd.notna(row['valence'])      else None,
-            generate_mock_z_vector(str(row['track_id'])),
+            str(row[ID_COL]),
+            str(row[NAME_COL]),
+            str(row[ARTIST_COL]),
+            float(row["danceability"]),
+            float(row["energy"]),
+            int(row["key"]),
+            float(row["loudness"]),
+            int(row["mode"]),
+            float(row["tempo"]),
+            float(row["valence"]),
+            str(row["z_vector_str"]),
         )
-        for _, row in df.iterrows()
+        for _, row in dataframe.iterrows()
     ]
-    
-    total = len(rows)
-    inserted = 0
-    start_time = time.time()
 
-    print(f'Inserting {total:,} rows in batches of {BATCH_SIZE}')
-    for i in range(0, total, BATCH_SIZE):
-        batch = rows[i:i+BATCH_SIZE]
-        execute_batch(cur, INSERT_SQL, batch, page_size=BATCH_SIZE)
-        conn.commit()
-        inserted += len(batch)
-        pct = (inserted/total)*100
-        elapsed = time.time()-start_time
-        print(f'[Populate]   {inserted:,}/{total:,} ({pct:.1f}%) — {elapsed:.1f}s elapsed')
 
-    cur.close()
-    conn.close()
+def main() -> None:
+    """Load the dataset, normalize audio features, and insert it in batches."""
+    if not CSV_PATH.is_file():
+        raise SystemExit(f"[Populate] ERROR - CSV not found: {CSV_PATH}")
 
-    elapsed = time.time() - start_time
-    print(f'[Populate] Done — {inserted:,} rows in {elapsed:.1f}s.')
-    print('[Populate] track_features is ready for pgvector search.')
+    print(f"[Populate] Reading {CSV_PATH} ...")
+    dataframe = pd.read_csv(CSV_PATH)
 
-if __name__ == '__main__':
+    missing_columns = [column for column in REQUIRED_COLUMNS if column not in dataframe.columns]
+    if missing_columns:
+        raise SystemExit(f"[Populate] ERROR - CSV missing columns: {missing_columns}")
+
+    before_count = len(dataframe)
+    dataframe = dataframe.dropna(subset=REQUIRED_COLUMNS).drop_duplicates(subset=ID_COL)
+    print(f"[Populate] {before_count:,} rows -> {len(dataframe):,} after dedup/null drop.")
+
+    print("[Populate] Normalizing real audio features into z_vector ...")
+    dataframe["z_vector_str"] = dataframe.apply(
+        lambda row: "[" + ",".join(str(value) for value in normalize_row(row)) + "]",
+        axis=1,
+    )
+    rows = build_rows(dataframe)
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT extname FROM pg_extension WHERE extname = 'vector'")
+            if cursor.fetchone() is None:
+                raise SystemExit("[Populate] ERROR - pgvector extension not installed.")
+
+            total_rows = len(rows)
+            inserted_rows = 0
+            start_time = time.monotonic()
+            for start_index in range(0, total_rows, BATCH_SIZE):
+                batch = rows[start_index : start_index + BATCH_SIZE]
+                execute_batch(cursor, INSERT_SQL, batch, page_size=BATCH_SIZE)
+                connection.commit()
+                inserted_rows += len(batch)
+                elapsed = time.monotonic() - start_time
+                print(f"[Populate]   {inserted_rows:,}/{total_rows:,} - {elapsed:.1f}s")
+    print(f"[Populate] Done - {len(rows):,} rows. z_vector is now real, not random.")
+
+
+if __name__ == "__main__":
     main()

@@ -3,7 +3,8 @@ from sqlalchemy import Column, String, Float, Integer, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from pgvector.sqlalchemy import Vector
 
-from database import Base
+from app.config import LATENT_DIM
+from app.database import Base
 
 
 class TrackFeature(Base):
@@ -19,7 +20,7 @@ class TrackFeature(Base):
     mode         = Column(Integer)
     tempo        = Column(Float)
     valence      = Column(Float)
-    z_vector     = Column(Vector(33), nullable=False)
+    z_vector     = Column(Vector(LATENT_DIM), nullable=False)
 
 
 class PredictionHistory(Base):

@@ -7,7 +7,6 @@ const SCOPES = [
     'user-read-private',
     'user-modify-playback-state',
     'user-read-playback-state',
-    'playlist-modify-private',
     'playlist-modify-private'
 ];
 
@@ -39,8 +38,6 @@ router.get('/callback',async(req,res)=>{
     try{
         const data = await spotifyApi.authorizationCodeGrant(code);
         const {access_token,refresh_token,expires_in} = data.body;
-        console.log(access_token);
-
         res.cookie(REFRESH_COOKIE_NAME,refresh_token,cookieOption());
         const redirect = new URL(process.env.FRONTEND_URL);
         redirect.searchParams.set('access_token',access_token);
@@ -62,7 +59,6 @@ router.post('/refresh', async (req, res) => {
         const data = await spotifyApi.refreshAccessToken();
         const { access_token, expires_in, refresh_token: rotated } = data.body;
         res.cookie(REFRESH_COOKIE_NAME, rotated || refresh_token, cookieOption());
-        console.log(access_token);
         res.json({ access_token, expires_in });
     } catch (err) {
         console.error('Error refreshing access token:', err);

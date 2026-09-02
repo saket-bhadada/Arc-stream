@@ -1,66 +1,56 @@
-// server/src/server.js
-import express from 'express';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import cookieParser from 'cookie-parser';
+import express from 'express';
 
-import db from './db.js';
-
-import loginRoutes from './components/loginRoutes.js';
 import dashboardRoutes from './components/DashboardRoutes.js';
+import loginRoutes from './components/loginRoutes.js';
+import db, { databaseReady } from './db.js';
 
 dotenv.config();
 
 const app = express();
-
-// ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors({
-  origin:      process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
   credentials: true,
 }));
 app.use(express.json());
 app.use(cookieParser());
 
-app.get('/health', async (req, res) => {
+app.get('/health', async (_req, res) => {
   try {
     await db.query('SELECT 1');
     res.json({
-      status:   'ok',
-      service:  'arc-stream-server',
+      status: 'ok',
+      service: 'arc-stream-server',
       database: 'connected',
-      seq_window: {
-        min: 5,
-        max: 9,
-      },
+      vector_dimension: 7,
+      seq_window: { min: 5, max: 9 },
     });
-  } catch (err) {
-    res.status(503).json({
-      status:   'error',
-      database: 'unreachable',
-      detail:   err.message,
-    });
+  } catch (error) {
+    res.status(503).json({ status: 'error', database: 'unreachable', detail: error.message });
   }
 });
 
-app.use('/',       loginRoutes);     
-app.use('/api/ai', dashboardRoutes); 
+app.use('/', loginRoutes);
+app.use('/api/ai', dashboardRoutes);
 
-
-app.use((err, req, res, next) => {
-  console.error('[Server] Unhandled error:', err.message);
+app.use((error, _req, res, _next) => {
+  console.error('[Server] Unhandled error:', error.message);
   res.status(500).json({
-    error:  'Internal server error',
-    detail: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    error: 'Internal server error',
+    detail: process.env.NODE_ENV === 'development' ? error.message : undefined,
   });
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`[Arc-Stream] Server        → http://localhost:${PORT}`);
-  console.log(`[Arc-Stream] Frontend      → ${process.env.FRONTEND_URL}`);
-  console.log(`[Arc-Stream] ML Service    → ${process.env.ML_SERVICE_URL}`);
-  console.log(`[Arc-Stream] Environment   → ${process.env.NODE_ENV || 'development'}`);
-  console.log(`[Arc-Stream] Z-vector window → MIN=${5} MAX=${9}`);
-  console.log('[Arc-Stream] Session cookie -> 3 month http only refresh token');
-});
+const port = Number(process.env.PORT) || 3000;
+try {
+  await databaseReady;
+  app.listen(port, () => {
+    console.log(`[Arc-Stream] Server: http://localhost:${port}`);
+  });
+} catch (error) {
+  console.error('[Server] Startup failed:', error.message);
+  await db.end();
+  process.exitCode = 1;
+}

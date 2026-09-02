@@ -7,14 +7,18 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from dotenv import load_dotenv
 # sys.path.insert(0,os.path.join(os.path.dirname(__file__),'..'))
 
-from model_arch import ArcStreamLSTM
-# from app.model_arch import ArcStreamLSTM
-from config import FEATURE_COLS, MIN_SEQ_LEN
-from feature_utils import normalize_row
+from app.model_arch import ArcStreamLSTM
+from app.config import FEATURE_COLS, MIN_SEQ_LEN
+from app.feature_utils import normalize_row
 
-CSV_PATH = os.path.join(os.path.dirname(__file__),'..','training','dataset.csv')
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+CSV_PATH = os.getenv(
+    'CSV_PATH',
+    os.path.join(os.path.dirname(__file__), '..', 'training', 'archive', 'tracks_features.csv'),
+)
 WEIGHTS_PATH = os.path.join(os.path.dirname(__file__),'weights','arc_stream_lstm.pth')
 SEQ_LEN = MIN_SEQ_LEN
 BATCH_SIZE = 64
@@ -47,12 +51,18 @@ class SequenceDataset(Dataset):
                 continue
             for i in range(n-self.seq_len):
                 windows_feats = feats[i:i+self.seq_len]
-                window_energy = energy[i:i + self.seq_len]
-                x = np.concatenate([windows_feats, window_energy[:, None]], axis=1)
+                target_energy = energy[i + self.seq_len]
+                target_column = np.full((self.seq_len, 1), target_energy, dtype=np.float32)
+                x = np.concatenate([windows_feats, target_column], axis=1)
                 y = feats[i+self.seq_len]
                 X_list.append(x)
                 y_list.append(y)
 
+        if not X_list:
+            return (
+                torch.empty((0, self.seq_len, len(FEATURE_COLS) + 1), dtype=torch.float32),
+                torch.empty((0, len(FEATURE_COLS)), dtype=torch.float32),
+            )
         return (
             torch.tensor(np.stack(X_list),dtype=torch.float32),
             torch.tensor(np.stack(y_list),dtype=torch.float32)
@@ -69,7 +79,7 @@ def main():
         print(f'[Train] ERROR CSV not found at {CSV_PATH}')
         sys.exit(1)
 
-    print(f'[Train] Loading weights from {CSV_PATH}')
+    print(f'[Train] Loading dataset from {CSV_PATH}')
     df = pd.read_csv(CSV_PATH)
     missing = [c for c in FEATURE_COLS if c not in df.columns]
     if missing:

@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react';
 import { usePlayerStore } from '../store/playerStore';
 
-const NODE_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const NODE_BASE = import.meta.env.VITE_NODE_BASE || 'http://localhost:3000';
 
 
 // ── Cookie-driven refresh helper ────────────────────────────────────────────
@@ -50,7 +50,6 @@ const useSpotifyPlayer = () => {
     accessToken,
     setPlayer, setDeviceId, setIsActive,
     setCurrentTrack, setIsPlaying, setPosition, setDuration,
-    addToHistory,
   } = usePlayerStore();
 
   useEffect(() => {
@@ -100,8 +99,6 @@ const useSpotifyPlayer = () => {
         setPosition(state.position);
         setDuration(state.duration);
 
-        if (current_track?.id) addToHistory(current_track.id);
-
         if (next_tracks.length < 2) {
           console.log('[Arc-Stream] Queue < 2 — buffer refill trigger ready for Phase 6.');
         }
@@ -127,7 +124,16 @@ const useSpotifyPlayer = () => {
         document.body.appendChild(script);
       }
     }
-  }, [accessToken]);
+  }, [
+    accessToken,
+    setCurrentTrack,
+    setDeviceId,
+    setDuration,
+    setIsActive,
+    setIsPlaying,
+    setPlayer,
+    setPosition,
+  ]);
 };
 
 
@@ -172,7 +178,52 @@ const DashboardPage = () => {
     accessToken, expiresAt,
     updateAccessToken, clearTokens,
     targetEnergy, setTargetEnergy,
+    currentTrack, currentZSequence, sessionHistory, sessionId,
+    appendDatasetTrack, setSessionId,
   } = usePlayerStore();
+  const fetchedTrackId = useRef(null);
+  const bufferedSequenceKey = useRef(null);
+
+  useEffect(() => {
+    const trackId = currentTrack?.id;
+    if (!trackId || fetchedTrackId.current === trackId) return;
+    fetchedTrackId.current = trackId;
+
+    fetch(`${NODE_BASE}/api/ai/track-vector/${encodeURIComponent(trackId)}`)
+      .then((response) => (response.ok ? response.json() : Promise.reject(response)))
+      .then(({ z_vector: vector }) => appendDatasetTrack(trackId, vector))
+      .catch(() => {
+        console.info('[Arc-Stream] Current Spotify track is not in the imported dataset.');
+      });
+  }, [currentTrack?.id, appendDatasetTrack]);
+
+  useEffect(() => {
+    if (!accessToken || currentZSequence.length < 5) return;
+
+    const sequenceKey = JSON.stringify(currentZSequence);
+    if (bufferedSequenceKey.current === sequenceKey) return;
+    bufferedSequenceKey.current = sequenceKey;
+
+    fetch(`${NODE_BASE}/api/ai/buffer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        access_token: accessToken,
+        target_energy: targetEnergy,
+        session_history: sessionHistory,
+        current_z_sequence: currentZSequence,
+      }),
+    })
+      .then((response) => (response.ok ? response.json() : Promise.reject(response)))
+      .then(({ session_id: nextSessionId }) => {
+        if (nextSessionId) setSessionId(nextSessionId);
+      })
+      .catch((error) => {
+        bufferedSequenceKey.current = null;
+        console.error('[Arc-Stream] Queue refill failed:', error);
+      });
+  }, [accessToken, currentZSequence, sessionHistory, sessionId, setSessionId, targetEnergy]);
 
   // Silent token refresh — no longer keyed on a refreshToken field in state,
   // just on expiresAt. The cookie backing this call may still be valid
@@ -195,7 +246,7 @@ const DashboardPage = () => {
     }, delay);
 
     return () => clearTimeout(timer);
-  }, [expiresAt]);
+  }, [clearTokens, expiresAt, updateAccessToken]);
 
   const handleActivate = async () => {
     try {
@@ -253,7 +304,9 @@ const DashboardPage = () => {
 
             <div style={s.queuePlaceholder}>
               <p style={s.queueHint}>
-                Queue preview — available in Phase 6 once FastAPI is connected.
+                {currentZSequence.length < 5
+                  ? `Learning from imported tracks: ${currentZSequence.length}/5 observed.`
+                  : 'Arc-Stream is keeping your Spotify queue supplied from the imported dataset.'}
               </p>
             </div>
 
