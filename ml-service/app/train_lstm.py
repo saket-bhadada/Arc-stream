@@ -8,7 +8,10 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from dotenv import load_dotenv
-# sys.path.insert(0,os.path.join(os.path.dirname(__file__),'..'))
+
+# Allow this file to be run directly from the app directory while retaining
+# the package imports used by the API service.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.model_arch import ArcStreamLSTM
 from app.config import FEATURE_COLS, MIN_SEQ_LEN
