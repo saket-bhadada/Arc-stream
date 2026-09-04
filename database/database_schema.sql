@@ -18,9 +18,6 @@ CREATE TABLE IF NOT EXISTS track_features (
     z_vector     vector(7)   NOT NULL
 );
 
--- Older revisions created track_features without metadata or with a 32/33
--- dimensional vector. Add the metadata safely and migrate only an empty table;
--- converting populated vectors would silently corrupt the feature contract.
 ALTER TABLE track_features ADD COLUMN IF NOT EXISTS track_name TEXT;
 ALTER TABLE track_features ADD COLUMN IF NOT EXISTS artists TEXT;
 DROP INDEX IF EXISTS track_features_z_vector_idx;
