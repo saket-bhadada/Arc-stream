@@ -1,4 +1,7 @@
 server/.env
+client/.env
+ml-service/.env
+*.env
 server/node_modules/
 client/node_modules/
 
@@ -6,10 +9,10 @@ client/node_modules/
 __pycache__/
 *.pyc
 ml-service/.venv/
-ml-service/.env
 
 # Temp helper scripts
 database/run_schema.js
 database/check_vector.js
 
 ml-service/training/archive/tracks_features.csv
+

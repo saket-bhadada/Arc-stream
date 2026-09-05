@@ -22,6 +22,7 @@ function App() {
       });
       return;
     }
+
     fetch(`${NODE_BASE}/refresh`,{
       method:'POST',
       credentials:'include'
