@@ -34,7 +34,7 @@ class ArcStreamLSTM(nn.Module):
             nn.Sigmoid(),
         )
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Return one normalized feature vector for every batch item."""
-        sequence_output, _ = self.lstm(inputs)
-        return self.head(sequence_output[:, -1, :])
+    def forward(self, x: torch.Tensor):
+        output, (h_n, c_n) = self.lstm(x)  # ✅ Unpack the tuple correctly
+        last_hidden = output[:, -1, :]  # Take last timestep
+        return self.head(last_hidden)
