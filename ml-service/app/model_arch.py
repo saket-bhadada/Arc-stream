@@ -38,3 +38,4 @@ class ArcStreamLSTM(nn.Module):
         output, (h_n, c_n) = self.lstm(x)  # ✅ Unpack the tuple correctly
         last_hidden = output[:, -1, :]  # Take last timestep
         return self.head(last_hidden)
+
