@@ -30,8 +30,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, '../database/database_schema.sql');
 
 export const databaseReady = (async () => {
-  const client = await db.connect();
+  console.log('[DB] Attempting to connect to the database...');
+  let client;
   try {
+    client = await db.connect();
+    console.log('[DB] Successfully connected. Checking schema...');
     await client.query(fs.readFileSync(schemaPath, 'utf8'));
     console.log('[DB] Schema verified successfully.');
   } catch (error) {
@@ -40,7 +43,7 @@ export const databaseReady = (async () => {
     }
     throw error;
   } finally {
-    client.release();
+    if (client) client.release();
   }
 })();
 

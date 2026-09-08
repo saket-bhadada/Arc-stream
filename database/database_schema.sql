@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS track_features (
 
 ALTER TABLE track_features ADD COLUMN IF NOT EXISTS track_name TEXT;
 ALTER TABLE track_features ADD COLUMN IF NOT EXISTS artists TEXT;
-DROP INDEX IF EXISTS track_features_z_vector_idx;
+-- DROP INDEX IF EXISTS track_features_z_vector_idx;
 
 DO $$
 DECLARE
@@ -49,10 +49,10 @@ BEGIN
     END IF;
 END $$;
 
-CREATE INDEX IF NOT EXISTS track_features_z_vector_idx
-    ON track_features
-    USING hnsw (z_vector vector_l2_ops)
-    WITH (m = 16, ef_construction = 64);
+-- CREATE INDEX IF NOT EXISTS track_features_z_vector_idx
+--     ON track_features
+--     USING hnsw (z_vector vector_l2_ops)
+--     WITH (m = 16, ef_construction = 64);
 
 CREATE TABLE IF NOT EXISTS prediction_history (
     id                   SERIAL       PRIMARY KEY,
