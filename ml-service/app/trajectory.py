@@ -63,7 +63,7 @@ def generate_energy_curve(start_energy:float,target_energy:float,count:int,curve
     target_energy = _clamp(target_energy)
 
     builder = _CURVE_BUILDERS.get(curve_type)
-    if builder in None:
+    if builder is None:
         raise ValueError(
             f"Unknown curve_type '{curve_type}' — expected one of {list(_CURVE_BUILDERS)}"
         )

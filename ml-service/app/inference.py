@@ -1,57 +1,57 @@
-"""Load trained weights and turn a feature sequence into a next-track vector."""
-
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Sequence
-
+import os
 import torch
-
-from app.config import FEATURE_COLS, LATENT_DIM
-from app.model_arch import ArcStreamLSTM
+from typing import List,Optional
+from model_arch import ArcStreamLSTM
+from config import LATENT_DIM
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-_model_cache: ArcStreamLSTM | None = None
+_model_cache: Optional[ArcStreamLSTM] = None
 
-
-def load_model(weights_path: str | Path) -> ArcStreamLSTM | None:
-    """Load trained weights, returning ``None`` when training has not run yet."""
+def load_model(weights_path:str)->ArcStreamLSTM:
     global _model_cache
     if _model_cache is not None:
         return _model_cache
-
-    path = Path(weights_path)
-    if not path.is_file():
-        print(f"[Inference] No trained weights at {path}; using energy-matching fallback.")
-        return None
-
     model = ArcStreamLSTM().to(DEVICE)
-    state_dict = torch.load(path, map_location=DEVICE, weights_only=True)
-    model.load_state_dict(state_dict)
+
+    if os.path.exists(weights_path):
+        model.load_state_dict(torch.load(weights_path,map_location=DEVICE))
+    else:
+        print(f'[Inference] WARNING — no weights at {weights_path}')
     model.eval()
     _model_cache = model
     return model
 
-
-def predict_next_latent_vector(
-    model: ArcStreamLSTM | None,
-    sequence_history: Sequence[Sequence[float]],
-    target_energy: float,
-) -> list[float]:
-    """Predict the next vector, or use the last vector with target energy set."""
+def predict_next_latent_vector(model,sequence_history:List[List[float]],target_energy:float)->List[float]:
+    """
+    Legacy entry point (Phase 6/7 buffer mode). Kept as-is — DashboardRoutes.js
+    /buffer -> /predict_buffer still calls through this path via main.py.
+    """
     if not sequence_history:
-        raise ValueError("sequence_history must contain at least one vector")
-    if any(len(vector) != LATENT_DIM for vector in sequence_history):
-        raise ValueError(f"Every vector in sequence_history must be {LATENT_DIM}-dimensional")
+        raise ValueError('sequence_history must contain at least one element')
+    if any(len(v) != LATENT_DIM for v in sequence_history):
+        raise ValueError(f'Every vector in sequence_history must be {LATENT_DIM}-dimensional')
 
-    if model is None:
-        prediction = list(sequence_history[-1])
-        prediction[FEATURE_COLS.index("energy")] = target_energy
-        return prediction
+    augmented = [[*v,target_energy] for v in sequence_history]
+    x = torch.tensor(augmented,dtype=torch.float32).to(DEVICE).unsqueeze(0)
 
-    augmented = [[*vector, target_energy] for vector in sequence_history]
-    inputs = torch.tensor(augmented, dtype=torch.float32, device=DEVICE).unsqueeze(0)
     with torch.no_grad():
-        prediction = model(inputs).sequeeze(0).cpu().tolist()
+        prediction = model(x)
+    return prediction.squeeze(0).cpu().tolist()
 
-    return [max(0.0, min(1.0, float(value))) for value in prediction]
+
+def predict_next_z_vector(model, sequence_history: List[List[float]], target_energy: float) -> List[float]:
+    """
+    Phase 8 autoregressive entry point. Functionally identical to
+    predict_next_latent_vector — same LATENT_DIM contract (7D feature
+    vectors, +1 appended target_energy scalar -> 8D LSTM input) — but
+    named to match the generate_playlist autoregressive loop's vocabulary
+    ("z_vector" is used throughout database_manager.py / models.py for
+    the per-track feature vector, even though there's no autoencoder
+    producing it anymore).
+
+    sequence_history: 5-9 rows of LATENT_DIM-dimensional (7D) feature
+    vectors — the rolling context window. target_energy: scalar in
+    [0,1] for this specific generation step, appended to every row
+    exactly like at training time (see train_lstm.py SequenceDataset).
+    """
+    return predict_next_latent_vector(model, sequence_history, target_energy)
