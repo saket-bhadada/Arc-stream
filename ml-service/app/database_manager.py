@@ -1,111 +1,124 @@
-"""Async PostgreSQL access for the recommendation service."""
-
-from __future__ import annotations
-
-from collections.abc import Sequence
-
+from fastapi import HTTPException
+import os
 import asyncpg
+from typing import Optional
+from dotenv import load_dotenv
 
-
-def _as_pgvector(values: Sequence[float]) -> str:
-    """Serialize a vector in the text format accepted by pgvector."""
-    return "[" + ",".join(f"{float(value):.8f}" for value in values) + "]"
-
-
-def _parse_pgvector(value: str) -> list[float]:
-    return [float(item) for item in value.strip("[]").split(",") if item]
-
+load_dotenv()
 
 class ArcStreamDB:
-    """Connection-pool owner and pgvector query boundary."""
-
-    def __init__(self, dsn: str) -> None:
+    def __init__(self,dsn:str):
         if not dsn:
-            raise RuntimeError("DATABASE_URL is required for the ML service.")
-        # SQLAlchemy-style URLs are common in .env files but not accepted by asyncpg.
-        self.dsn = dsn.replace("postgresql+psycopg2://", "postgresql://", 1)
-        self.pool: asyncpg.Pool | None = None
+            raise RuntimeError(
+                '[Arc-StreamDB] Database_url is not set in ml_service/app'
+            )
+        self.dsn = dsn
+        self.pool:Optional[asyncpg.pool] = None
 
-    async def connect(self) -> None:
-        self.pool = await asyncpg.create_pool(self.dsn, min_size=2, max_size=10)
-        print("[ArcStreamDB] asyncpg pool connected")
+    async def connect(self):
+        self.pool = await asyncpg.create_pool(
+            self.dsn,
+            min_size = 2,
+            max_size = 10,
+        )
+        print('[Arc-StreamDB] asyncpg pool connected')
 
-    async def disconnect(self) -> None:
-        if self.pool is not None:
+    async def disconnect(self):
+        if self.pool:
             await self.pool.close()
-            self.pool = None
-            print("[ArcStreamDB] asyncpg pool closed")
+            print('[Arc-StreamDB] asyncpg pool closed')
 
-    def _require_pool(self) -> asyncpg.Pool:
-        if self.pool is None:
-            raise RuntimeError("Database pool is not initialized. Call connect() first.")
-        return self.pool
+    async def find_nearest_track(self,predicted_vector:list[float],session_history:list[str],top_k:int=30,return_n:int = 3)->list[dict]:
+        if not self.pool:
+            raise RuntimeError(
+                '[ArcStreamDB] Pool not initialised. Call connect() first.'
+            )
 
-    async def find_nearest_tracks(
-        self,
-        predicted_vector: Sequence[float],
-        excluded_track_ids: Sequence[str],
-        limit: int = 1,
-    ) -> list[dict[str, object]]:
-        """Return unique nearest tracks, excluding IDs already used in a session."""
-        if limit < 1:
-            return []
-
+        vector_str = '[' + ','.join(
+            str(round(float(v), 8)) for v in predicted_vector
+        ) + ']'
+        fetch_limit = top_k + len(session_history) + 10
         query = """
             SELECT
-                id AS track_id,
+                id           AS track_id,
                 track_name,
                 artists,
                 energy,
-                z_vector::text AS z_vector
-            FROM track_features
-            WHERE NOT (id = ANY($2::text[]))
+                z_vector::text AS z_vector_str
+            FROM  track_features
             ORDER BY z_vector <-> $1::vector
-            LIMIT $3
+            LIMIT $2
         """
-        rows = await self._require_pool().fetch(
-            query,
-            _as_pgvector(predicted_vector),
-            list(excluded_track_ids),
-            limit,
-        )
-        return [
-            {
-                "track_id": row["track_id"],
-                "track_name": row["track_name"],
-                "artists": row["artists"],
-                "energy": row["energy"],
-                "z_vector": _parse_pgvector(row["z_vector"]),
-            }
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query,vector_str,fetch_limit)
+
+        history_set = set(session_history)
+        fresh = [
+            dict(row) 
             for row in rows
+            if row['track_id'] not in history_set
         ]
+        return fresh[:return_n]
 
-    async def get_track_z_vector(self, track_id: str) -> list[float] | None:
-        """Fetch a stored normalized vector by Spotify track ID."""
-        row = await self._require_pool().fetchrow(
-            "SELECT z_vector::text AS z_vector FROM track_features WHERE id = $1",
-            track_id,
-        )
-        return _parse_pgvector(row["z_vector"]) if row is not None else None
 
-    async def get_energy_seed(self, target_energy: float) -> list[float] | None:
-        """Return a dataset vector near an energy target to start a playlist."""
-        row = await self._require_pool().fetchrow(
-            """
-            SELECT z_vector::text AS z_vector
-            FROM track_features
-            ORDER BY ABS(energy - $1), id
-            LIMIT 1
-            """,
-            target_energy,
-        )
-        return _parse_pgvector(row["z_vector"]) if row is not None else None
+    async def get_track_z_vector(self,track_id:str)->list[float]:
+        if not self.pool:
+            raise RuntimeError(
+                 '[ArcStreamDB] Pool not initialised. Call connect() first.'
+            )
+        
+        query = """
+            SELECT z_vector::text AS z_vector_str
+            FROM   track_features
+            WHERE  id = $1
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query,track_id)
 
-    async def ping(self) -> bool:
+        if not row:
+            raise ValueError(
+                f"No track found for id: {track_id}"
+            )
+
+        raw = row['z_vector_str'].strip('[]')
+        return [float(v) for v in raw.split(',')]
+
+    async def get_track_z_vectors_batch(self, track_ids: list[str]) -> dict[str, list[float]]:
+        """
+        Phase 8 helper — fetch z_vectors for multiple seed_track_ids in one
+        round trip instead of N sequential get_track_z_vector() calls.
+        Returns {track_id: z_vector}; silently omits ids that don't exist
+        so the caller can decide whether a partial seed set is acceptable.
+        """
+        if not self.pool:
+            raise RuntimeError(
+                '[ArcStreamDB] Pool not initialised. Call connect() first.'
+            )
+        if not track_ids:
+            return {}
+
+        query = """
+            SELECT id AS track_id, z_vector::text AS z_vector_str
+            FROM   track_features
+            WHERE  id = ANY($1::text[])
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, track_ids)
+
+        result = {}
+        for row in rows:
+            raw = row['z_vector_str'].strip('[]')
+            result[row['track_id']] = [float(v) for v in raw.split(',')]
+        return result
+
+    async def ping(self)->bool:
         try:
-            return await self._require_pool().fetchval("SELECT 1") == 1
+            async with self.pool.acquire() as conn:
+                await conn.fetchval('SELECT 1')
+            return True
         except Exception:
             return False
 
-    async def track_count(self) -> int:
-        return int(await self._require_pool().fetchval("SELECT COUNT(*) FROM track_features"))
+    async def track_count(self)->int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('Select COUNT(*) FROM track_features')
