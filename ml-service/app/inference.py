@@ -1,8 +1,8 @@
 import os
 import torch
 from typing import List,Optional
-from model_arch import ArcStreamLSTM
-from config import LATENT_DIM
+from app.model_arch import ArcStreamLSTM
+from app.config import LATENT_DIM
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _model_cache: Optional[ArcStreamLSTM] = None
