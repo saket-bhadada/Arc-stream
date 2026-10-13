@@ -1,8 +1,10 @@
 // client/src/pages/DashboardPage.jsx
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { usePlayerStore } from '../store/playerStore';
+import { UpNextQueue } from './UpNextQueue';
+import PlaylistGenerator from './PlaylistGenerator';
 
-const NODE_BASE = import.meta.env.VITE_NODE_BASE || 'http://localhost:3000';
+const NODE_BASE = import.meta.env.VITE_NODE_BASE || 'http://127.0.0.1:3000';
 
 
 // ── Cookie-driven refresh helper ────────────────────────────────────────────
@@ -172,6 +174,7 @@ const NowPlaying = () => {
 // ════════════════════════════════════════════════════════════════════════════
 const DashboardPage = () => {
   useSpotifyPlayer();
+  const [showGenerator, setShowGenerator] = useState(false);
 
   const {
     deviceId, isActive,
@@ -272,6 +275,7 @@ const DashboardPage = () => {
             {isActive ? 'LIVE' : deviceId ? 'READY' : 'CONNECTING'}
           </span>
           <span style={s.statusDot(isActive)} />
+          <button style={s.playlistBtn} onClick={() => setShowGenerator(true)}>? Generate Playlist</button>
           <button style={s.logoutBtn} onClick={handleLogout}>Log out</button>
         </div>
       </header>
@@ -302,13 +306,7 @@ const DashboardPage = () => {
               </div>
             </div>
 
-            <div style={s.queuePlaceholder}>
-              <p style={s.queueHint}>
-                {currentZSequence.length < 5
-                  ? `Learning from imported tracks: ${currentZSequence.length}/5 observed.`
-                  : 'Arc-Stream is keeping your Spotify queue supplied from the imported dataset.'}
-              </p>
-            </div>
+            <UpNextQueue />
 
           </div>
         ) : (
@@ -331,6 +329,7 @@ const DashboardPage = () => {
         )}
       </main>
 
+      {showGenerator && <PlaylistGenerator onClose={() => setShowGenerator(false)} />}
     </div>
   );
 };
@@ -356,6 +355,11 @@ const s = {
     boxShadow: active ? '0 0 8px #1DB954' : 'none',
     transition: 'all 0.4s ease',
   }),
+  playlistBtn: {
+    background: '#1DB954', border: 'none', color: '#000',
+    fontSize: 10, fontWeight: 800, letterSpacing: '1px',
+    padding: '6px 14px', borderRadius: 20, cursor: 'pointer',
+  },
   logoutBtn: {
     background: 'none', border: '1px solid #2a2a3a', color: '#6b7280',
     fontSize: 10, fontWeight: 700, letterSpacing: '1px',

@@ -42,7 +42,23 @@ export const usePlayerStore = create((set) => ({
   sessionHistory:   [],
   currentZSequence: [],
   targetEnergy:     0.5,
-  sessionId:        null,
+  sessionId:        typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : null,
+
+  // ─── UP NEXT QUEUE STATE ──────────────────────────────────────────────────
+  upNext:           [],
+  analysis:         null,
+  upNextStatus:     'idle', // 'idle' | 'loading' | 'ready' | 'unmapped' | 'error'
+  upNextError:      null,
+  queuedIds:        [],
+
+  setUpNext:        (upNext) => set({ upNext }),
+  setAnalysis:      (analysis) => set({ analysis }),
+  setUpNextStatus:  (upNextStatus) => set({ upNextStatus }),
+  setUpNextError:   (upNextError) => set({ upNextError }),
+  setQueuedIds:     (queuedIds) => set({ queuedIds }),
+  addQueuedIds:     (ids) => set((state) => ({
+    queuedIds: [...state.queuedIds, ...(Array.isArray(ids) ? ids : [ids])],
+  })),
 
   appendDatasetTrack: (trackId, vector) => set((state) => {
     if (state.sessionHistory.at(-1) === trackId) return state;
@@ -54,5 +70,14 @@ export const usePlayerStore = create((set) => ({
   setSessionId: (sessionId) => set({ sessionId }),
   setCurrentZSequence: (sequence) => set({ currentZSequence: sequence }),
   setTargetEnergy:     (energy)   => set({ targetEnergy: energy }),
-  resetSession: () => set({ sessionId: null, sessionHistory: [], currentZSequence: [] }),
+  resetSession: () => set({
+    sessionId: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : null,
+    sessionHistory: [],
+    currentZSequence: [],
+    upNext: [],
+    analysis: null,
+    upNextStatus: 'idle',
+    upNextError: null,
+    queuedIds: [],
+  }),
 }));

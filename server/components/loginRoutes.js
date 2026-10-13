@@ -7,7 +7,8 @@ const SCOPES = [
     'user-read-private',
     'user-modify-playback-state',
     'user-read-playback-state',
-    'playlist-modify-private'
+    'playlist-modify-private',
+    'playlist-modify-public'
 ];
 
 const router = Router();

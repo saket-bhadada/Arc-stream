@@ -58,6 +58,13 @@ class PlaylistRequest(BaseModel):
     session_history: list[str] = Field(default_factory=list)
 
 
+class QueuePredictRequest(BaseModel):
+    seed_track_ids: list[str] = Field(min_length=1, max_length=9)
+    target_energy: float = Field(ge=0.0, le=1.0)
+    count: int = Field(default=5, ge=1, le=10)
+    session_history: list[str] = Field(default_factory=list)
+
+
 def validate_vectors(vectors: Sequence[Sequence[float]]) -> None:
     """Enforce the same seven-dimensional shape as the imported CSV vectors."""
     if any(
@@ -155,3 +162,92 @@ async def generate_playlist(payload: PlaylistRequest) -> dict[str, object]:
         sequence.append(selected_vector)
 
     return {"tracks": tracks, "curve_len": len(tracks)}
+
+
+@app.post("/predict_queue")
+async def predict_queue(payload: QueuePredictRequest) -> dict[str, object]:
+    vectors_map = await arc_db.get_track_z_vectors_batch(payload.seed_track_ids)
+    resolved_seeds: list[tuple[str, list[float]]] = [
+        (tid, vectors_map[tid])
+        for tid in payload.seed_track_ids
+        if tid in vectors_map
+    ]
+
+    if not resolved_seeds:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "NO_MAPPED_SEEDS",
+                "message": "None of the provided seed tracks exist in the dataset.",
+            },
+        )
+
+    last_resolved_id = resolved_seeds[-1][0]
+    analysis = await arc_db.get_track_features(last_resolved_id)
+    if not analysis:
+        analysis = {
+            "track_id": last_resolved_id,
+            "track_name": "",
+            "artists": "",
+            "energy": 0.0,
+            "valence": 0.0,
+            "danceability": 0.0,
+            "tempo": 0.0,
+        }
+
+    recent_vectors = [vec for _, vec in resolved_seeds[-MIN_SEQ_LEN:]]
+    seeds_used = len(recent_vectors)
+    padded = False
+
+    if len(recent_vectors) < MIN_SEQ_LEN:
+        oldest_vec = recent_vectors[0]
+        padding = [oldest_vec for _ in range(MIN_SEQ_LEN - len(recent_vectors))]
+        window = padding + recent_vectors
+        padded = True
+    else:
+        window = list(recent_vectors)
+
+    excluded_ids = set(payload.session_history) | set(payload.seed_track_ids)
+    tracks: list[dict[str, object]] = []
+
+    for step in range(payload.count):
+        prediction = predict_next_latent_vector(
+            model=app.state.model,
+            sequence_history=window[-MIN_SEQ_LEN:],
+            target_energy=payload.target_energy,
+        )
+        matches = await arc_db.find_nearest_track(
+            predicted_vector=prediction,
+            session_history=list(excluded_ids),
+            top_k=30,
+            return_n=1,
+        )
+        if not matches:
+            raise HTTPException(status_code=404, detail="No unused tracks remain in track_features.")
+
+        picked = matches[0]
+        track_id = str(picked["track_id"])
+        excluded_ids.add(track_id)
+
+        real_z_vector = picked.get("z_vector")
+        if not isinstance(real_z_vector, list):
+            real_z_vector = await arc_db.get_track_z_vector(track_id)
+            if not real_z_vector:
+                raise HTTPException(status_code=500, detail="Database returned an invalid track vector.")
+
+        tracks.append({
+            "position": step + 1,
+            "track_id": track_id,
+            "track_name": picked.get("track_name", ""),
+            "artists": picked.get("artists", ""),
+            "energy": float(picked.get("energy", 0.0)),
+            "predicted_vector": prediction,
+        })
+        window.append(real_z_vector)
+
+    return {
+        "analysis": analysis,
+        "tracks": tracks,
+        "seeds_used": seeds_used,
+        "padded": padded,
+    }

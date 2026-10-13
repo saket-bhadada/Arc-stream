@@ -148,7 +148,7 @@ const createPlaylist = async (req, res) => {
     const userProfile = await spotifyFetch('/me', accessToken);
     const name = playlistName || `Arc-Stream Mix ${new Date().toLocaleDateString('en-US')}`;
 
-    const newPlaylist = await spotifyFetch(`/users/${userProfile.id}/playlists`, accessToken, {
+    const newPlaylist = await spotifyFetch(`/me/playlists`, accessToken, {
       method: 'POST',
       body: JSON.stringify({
         name,
@@ -196,5 +196,143 @@ const createPlaylist = async (req, res) => {
 
 router.post('/playlist', createPlaylist);
 router.post('/playList', createPlaylist);
+
+router.post('/queue-preview', async (req, res) => {
+  const {
+    seed_track_ids: seedTrackIds,
+    target_energy: targetEnergy,
+    count = 5,
+    session_history: sessionHistory = [],
+  } = req.body;
+
+  if (
+    !Array.isArray(seedTrackIds)
+    || seedTrackIds.length < 1
+    || seedTrackIds.length > 9
+    || seedTrackIds.some((id) => typeof id !== 'string' || !id.trim())
+  ) {
+    return res.status(400).json({ error: 'seed_track_ids must be an array of 1 to 9 non-empty string IDs' });
+  }
+
+  if (!Number.isFinite(targetEnergy) || targetEnergy < 0 || targetEnergy > 1) {
+    return res.status(400).json({ error: 'target_energy must be a number between 0 and 1' });
+  }
+
+  const effectiveCount = Number.isInteger(count) ? count : 5;
+  if (effectiveCount < 1 || effectiveCount > 10) {
+    return res.status(400).json({ error: 'count must be an integer between 1 and 10' });
+  }
+
+  try {
+    const upstreamRes = await fetch(`${ML_BASE}/predict_queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        seed_track_ids: seedTrackIds,
+        target_energy: targetEnergy,
+        count: effectiveCount,
+        session_history: Array.isArray(sessionHistory) ? sessionHistory : [],
+      }),
+    });
+
+    const body = await upstreamRes.json().catch(() => null);
+
+    if (!upstreamRes.ok) {
+      if (upstreamRes.status >= 400 && upstreamRes.status < 500) {
+        return res.status(upstreamRes.status).json(body || { error: 'Upstream client error' });
+      }
+      return res.status(502).json({ error: 'ML service error', detail: body });
+    }
+
+    return res.json(body);
+  } catch (error) {
+    console.error('[Queue Preview] Error communicating with ML service:', error.message);
+    return res.status(502).json({ error: 'ML service unreachable', detail: error.message });
+  }
+});
+
+router.post('/queue-commit', async (req, res) => {
+  const {
+    access_token: accessToken,
+    device_id: deviceId,
+    session_id: clientSessionId,
+    target_energy: targetEnergy,
+    tracks,
+  } = req.body;
+
+  if (!accessToken) {
+    return res.status(401).json({ error: 'Missing access token' });
+  }
+
+  if (!Array.isArray(tracks) || tracks.length === 0) {
+    return res.status(400).json({ error: 'tracks must be a non-empty array' });
+  }
+
+  if (!Number.isFinite(targetEnergy) || targetEnergy < 0 || targetEnergy > 1) {
+    return res.status(400).json({ error: 'target_energy must be a number between 0 and 1' });
+  }
+
+  const sessionId = clientSessionId || randomUUID();
+  const queued = [];
+  const failed = [];
+
+  const deviceQuery = deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : '';
+
+  for (const track of tracks) {
+    const trackId = track?.track_id;
+    if (!trackId) {
+      failed.push({ track_id: null, error: 'Missing track_id' });
+      continue;
+    }
+
+    try {
+      await spotifyFetch(
+        `/me/player/queue?uri=${encodeURIComponent(`spotify:track:${trackId}`)}${deviceQuery}`,
+        accessToken,
+        { method: 'POST' },
+      );
+      queued.push(trackId);
+    } catch (error) {
+      console.warn(`[Queue Commit] Failed to queue track ${trackId}:`, error.message);
+      failed.push({ track_id: trackId, error: error.message });
+      if (error.message.includes('404')) {
+        break;
+      }
+    }
+  }
+
+  if (queued.length > 0) {
+    try {
+      const userProfile = await spotifyFetch('/me', accessToken);
+      const queuedSet = new Set(queued);
+      const successfulTracks = tracks.filter((t) => queuedSet.has(t.track_id));
+
+      for (const track of successfulTracks) {
+        await db.query(
+          `INSERT INTO prediction_history
+            (session_id, user_spotify_id, target_energy, predicted_vector, recommended_track_id, seq_len)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            sessionId,
+            userProfile.id,
+            targetEnergy,
+            JSON.stringify(track.predicted_vector || []),
+            track.track_id,
+            5,
+          ],
+        );
+      }
+    } catch (dbError) {
+      console.error('[Queue Commit] Error recording prediction_history:', dbError.message);
+    }
+  }
+
+  return res.json({
+    success: true,
+    session_id: sessionId,
+    queued,
+    failed,
+  });
+});
 
 export default router;
