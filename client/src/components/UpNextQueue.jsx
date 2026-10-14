@@ -92,15 +92,17 @@ export const UpNextQueue = () => {
       .catch((err) => {
         if (controller.signal.aborted || err.name === 'AbortError') return;
         if (err.code === 'NO_MAPPED_SEEDS') {
-          setUpNextStatus('unmapped');
-          setUpNext([]);
-          setAnalysis(null);
+          const existing = usePlayerStore.getState().upNext;
+          if (existing && existing.length > 0) {
+            setUpNextStatus('ready');
+          } else {
+            setUpNextStatus('unmapped');
+          }
         } else {
           setUpNextStatus('error');
           setUpNextError(err.message || 'Failed to predict upcoming tracks.');
         }
       });
-
     return () => {
       controller.abort();
     };

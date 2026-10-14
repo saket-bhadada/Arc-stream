@@ -159,10 +159,23 @@ const createPlaylist = async (req, res) => {
 
     const uris = tracks.map((track) => `spotify:track:${track.track_id}`);
     for (let index = 0; index < uris.length; index += 100) {
-      await spotifyFetch(`/playlists/${newPlaylist.id}/tracks`, accessToken, {
-        method: 'POST',
-        body: JSON.stringify({ uris: uris.slice(index, index + 100) }),
-      });
+      const chunk = uris.slice(index, index + 100);
+      try {
+        await spotifyFetch(`/playlists/${newPlaylist.id}/tracks`, accessToken, {
+          method: 'POST',
+          body: JSON.stringify({ uris: chunk }),
+        });
+      } catch (err) {
+        if (err.message && err.message.includes('403')) {
+          console.warn('[Playlist] /tracks returned 403, attempting /items fallback...');
+          await spotifyFetch(`/playlists/${newPlaylist.id}/items`, accessToken, {
+            method: 'POST',
+            body: JSON.stringify({ uris: chunk }),
+          });
+        } else {
+          throw err;
+        }
+      }
     }
 
     const { rows } = await db.query(

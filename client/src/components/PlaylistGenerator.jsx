@@ -161,6 +161,21 @@ const PlaylistGenerator = ({ onClose }) => {
 
       setResult({ ...data, spotify_url: data.playlist_url });
       setStatus('success');
+
+      const { setUpNext, setUpNextStatus, setAnalysis } = usePlayerStore.getState();
+      if (data.tracks && data.tracks.length > 0) {
+        setUpNext(data.tracks.map((t, idx) => ({ ...t, position: idx + 1 })));
+        setUpNextStatus('ready');
+        setAnalysis({
+          track_id: data.tracks[0].track_id,
+          track_name: data.tracks[0].track_name,
+          artists: data.tracks[0].artists,
+          energy: data.tracks[0].energy || targetEnergy,
+          valence: 0.5,
+          danceability: 0.5,
+          tempo: 120,
+        });
+      }
     } catch (err) {
       console.error('[PlaylistGenerator] Export failed:', err);
       setStatus('error');
