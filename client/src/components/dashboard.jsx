@@ -1,16 +1,22 @@
-// client/src/pages/DashboardPage.jsx
+// client/src/components/dashboard.jsx
 import { useEffect, useRef, useState } from 'react';
 import { usePlayerStore } from '../store/playerStore';
-import { UpNextQueue } from './UpNextQueue';
-import PlaylistGenerator from './PlaylistGenerator';
+import { NODE_BASE, fetchTrackVectors, requestBuffer } from '../services/arcApi';
+import VectorRadarChart from './VectorRadarChart';
+import TrajectoryGraph from './TrajectoryGraph';
+import QueueTray from './QueueTray';
+import PlaylistGenerator from './PlaylistGenerator'; // Phase 8
 
-const NODE_BASE = import.meta.env.VITE_NODE_BASE || 'http://127.0.0.1:3000';
+const SPOTIFY_BASE = 'https://api.spotify.com/v1';
+
+// LSTM was trained on 5-step windows, so inference uses the last 5 tracks.
+const SEQ_LEN = 5;
+const MIN_SEQ_LEN = 5;                  // server accepts 5–9
+const AUTO_DJ_THRESHOLD_MS = 25_000;
+const AUTO_DJ_TICK_MS = 1000;
 
 
 // ── Cookie-driven refresh helper ────────────────────────────────────────────
-// No refresh_token argument anymore — the browser attaches the httpOnly
-// cookie automatically. credentials: 'include' is what makes that happen
-// on this cross-origin (5173 → 3000) request.
 const refreshAccessToken = async () => {
   const res = await fetch(`${NODE_BASE}/refresh`, {
     method:      'POST',
@@ -29,8 +35,6 @@ const logoutRequest = async () => {
 
 
 // ── Spotify service functions ────────────────────────────────────────────────
-const SPOTIFY_BASE = 'https://api.spotify.com/v1';
-
 const transferPlayback = async (deviceId, accessToken, play = false) => {
   const res = await fetch(`${SPOTIFY_BASE}/me/player`, {
     method: 'PUT',
@@ -52,13 +56,13 @@ const useSpotifyPlayer = () => {
     accessToken,
     setPlayer, setDeviceId, setIsActive,
     setCurrentTrack, setIsPlaying, setPosition, setDuration,
+    registerPlayedTrack,
   } = usePlayerStore();
 
   useEffect(() => {
     if (!accessToken) return;
 
     const initPlayer = () => {
-      // Avoid duplicate player instantiation
       if (usePlayerStore.getState().player) return;
 
       const player = new window.Spotify.Player({
@@ -94,16 +98,16 @@ const useSpotifyPlayer = () => {
         }
         setIsActive(true);
 
-        const { current_track, next_tracks } = state.track_window;
+        const { current_track } = state.track_window;
 
         setCurrentTrack(current_track);
         setIsPlaying(!state.paused);
-        setPosition(state.position);
+        setPosition(state.position);   // also stamps positionUpdatedAt
         setDuration(state.duration);
 
-        if (next_tracks.length < 2) {
-          console.log('[Arc-Stream] Queue < 2 — buffer refill trigger ready for Phase 6.');
-        }
+        // Idempotent: history + metadata once per track, and drains the
+        // upcoming queue when a buffered track starts playing.
+        registerPlayedTrack(current_track);
       });
 
       player.connect().then((success) => {
@@ -126,20 +130,75 @@ const useSpotifyPlayer = () => {
         document.body.appendChild(script);
       }
     }
-  }, [
-    accessToken,
-    setCurrentTrack,
-    setDeviceId,
-    setDuration,
-    setIsActive,
-    setIsPlaying,
-    setPlayer,
-    setPosition,
-  ]);
+  }, [accessToken]);
 };
 
 
-// ── NowPlaying card ───────────────────────────────────────────────────────────
+// ── useAutoDJ hook ────────────────────────────────────────────────────────────
+// player_state_changed only fires on play/pause/seek/track change, never on a
+// timer, so a pure event handler would never see the 25 s mark. The event
+// supplies position + duration (stored with a timestamp); this 1 s tick
+// extrapolates the live position from it.
+//
+// Fires onTrigger when: enabled AND playing AND remaining <= 25 s AND the AI
+// queue is empty AND this track ID hasn't triggered yet.
+const useAutoDJ = (isAutoDJEnabled, onTrigger) => {
+  const [remainingMs, setRemainingMs] = useState(null);
+
+  const hasTriggeredForTrack = useRef(null);   // id of the last track that fired
+  const onTriggerRef = useRef(onTrigger);
+
+  useEffect(() => { onTriggerRef.current = onTrigger; }, [onTrigger]);
+
+  useEffect(() => {
+    if (!isAutoDJEnabled) return;
+
+    const tick = () => {
+      const st = usePlayerStore.getState();
+      const trackId = st.currentTrack?.id;
+      if (!trackId || !st.isPlaying || st.duration <= 0) return;
+
+      const position = st.position + (Date.now() - st.positionUpdatedAt);
+      const remaining = st.duration - position;
+      setRemainingMs(remaining);
+
+      if (remaining > AUTO_DJ_THRESHOLD_MS) return;
+      if (st.upcomingQueue.length > 0) return;
+      if (hasTriggeredForTrack.current === trackId) return;
+
+      hasTriggeredForTrack.current = trackId;  // once per track, even if the call fails
+      onTriggerRef.current();
+    };
+
+    const id = setInterval(tick, AUTO_DJ_TICK_MS);
+    return () => clearInterval(id);
+  }, [isAutoDJEnabled]);
+
+  return isAutoDJEnabled ? remainingMs : null;
+};
+
+
+// ── Small UI pieces ───────────────────────────────────────────────────────────
+const fmtTime = (ms) => {
+  const t = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+};
+
+const Switch = ({ checked, onChange, label, hint }) => (
+  <div style={s.switchRow}>
+    <div>
+      <div style={s.switchLabel}>{label}</div>
+      {hint && <div style={s.switchHint}>{hint}</div>}
+    </div>
+    <button
+      type="button" role="switch" aria-checked={checked}
+      onClick={() => onChange(!checked)} style={s.switchTrack(checked)}
+    >
+      <span style={s.switchKnob} />
+    </button>
+  </div>
+);
+
 const NowPlaying = () => {
   const { currentTrack, isPlaying, player } = usePlayerStore();
 
@@ -168,70 +227,96 @@ const NowPlaying = () => {
   );
 };
 
+const CURVES = [
+  { id: 'linear', label: 'Linear' },
+  { id: 'arc',    label: 'Arc' },
+  { id: 'wave',   label: 'Wave' },
+];
+
+// Drawer: trajectory preview + planner controls, with a hand-off to the Phase 8
+// PlaylistGenerator. Once a playlist is generated, generatedTracks overlays the
+// actual energies on the planned curve.
+const PlannerDrawer = ({ onClose, generatedTracks, onOpenGenerator }) => {
+  const [startEnergy,  setStartEnergy]  = useState(0.3);
+  const [targetEnergy, setTargetEnergy] = useState(0.8);
+  const [trackCount,   setTrackCount]   = useState(10);
+  const [curveType,    setCurveType]    = useState('arc');
+
+  const sliders = [
+    ['Start energy',  startEnergy,  setStartEnergy,  0, 1,  0.01, (v) => v.toFixed(2)],
+    ['Target energy', targetEnergy, setTargetEnergy, 0, 1,  0.01, (v) => v.toFixed(2)],
+    ['Tracks',        trackCount,   setTrackCount,   5, 30, 1,    (v) => v],
+  ];
+
+  return (
+    <>
+      <div style={s.overlay} onClick={onClose} />
+      <aside style={s.drawer}>
+        <div style={s.drawerHead}>
+          <span style={s.sectionLabel}>TRAJECTORY PLANNER</span>
+          <button style={s.ghostBtn} onClick={onClose}>Close</button>
+        </div>
+
+        <TrajectoryGraph
+          startEnergy={startEnergy} targetEnergy={targetEnergy}
+          trackCount={trackCount}   curveType={curveType}
+          generatedTracks={generatedTracks}
+        />
+
+        <div style={s.curveRow}>
+          {CURVES.map((c) => (
+            <button
+              key={c.id} type="button" onClick={() => setCurveType(c.id)}
+              style={s.pill(curveType === c.id)}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+
+        {sliders.map(([label, value, setter, min, max, step, fmt]) => (
+          <div key={label} style={s.energyWrap}>
+            <div style={s.energyHeader}>
+              <span style={s.energyLabel}>{label.toUpperCase()}</span>
+              <span style={s.energyValue}>{fmt(value)}</span>
+            </div>
+            <input
+              type="range" min={min} max={max} step={step} value={value}
+              onChange={(e) => setter(parseFloat(e.target.value))}
+              style={s.slider}
+            />
+          </div>
+        ))}
+
+        <button style={s.queueBtn} onClick={onOpenGenerator}>Open playlist generator</button>
+      </aside>
+    </>
+  );
+};
+
 
 // ════════════════════════════════════════════════════════════════════════════
 // DASHBOARD PAGE
 // ════════════════════════════════════════════════════════════════════════════
 const DashboardPage = () => {
   useSpotifyPlayer();
-  const [showGenerator, setShowGenerator] = useState(false);
 
   const {
-    deviceId, isActive,
-    accessToken, expiresAt,
+    deviceId, isActive, accessToken, expiresAt,
     updateAccessToken, clearTokens,
     targetEnergy, setTargetEnergy,
-    currentTrack, currentZSequence, sessionHistory, sessionId,
-    appendDatasetTrack, setSessionId,
+    currentTrack, currentVector, predictedVector,
+    upcomingQueue, sessionHistory, trackMeta, setCurrentVector,
   } = usePlayerStore();
-  const fetchedTrackId = useRef(null);
-  const bufferedSequenceKey = useRef(null);
 
-  useEffect(() => {
-    const trackId = currentTrack?.id;
-    if (!trackId || fetchedTrackId.current === trackId) return;
-    fetchedTrackId.current = trackId;
+  const [isAutoDJEnabled, setIsAutoDJEnabled] = useState(false);
+  const [queueStatus, setQueueStatus] = useState({ kind: 'idle', msg: '' });
+  const [plannerOpen, setPlannerOpen] = useState(false);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [generatedTracks, setGeneratedTracks] = useState([]);
+  const queueInFlightRef = useRef(false);
 
-    fetch(`${NODE_BASE}/api/ai/track-vector/${encodeURIComponent(trackId)}`)
-      .then((response) => (response.ok ? response.json() : Promise.reject(response)))
-      .then(({ z_vector: vector }) => appendDatasetTrack(trackId, vector))
-      .catch(() => {
-        console.info('[Arc-Stream] Current Spotify track is not in the imported dataset.');
-      });
-  }, [currentTrack?.id, appendDatasetTrack]);
-
-  useEffect(() => {
-    if (!accessToken || currentZSequence.length < 5) return;
-
-    const sequenceKey = JSON.stringify(currentZSequence);
-    if (bufferedSequenceKey.current === sequenceKey) return;
-    bufferedSequenceKey.current = sequenceKey;
-
-    fetch(`${NODE_BASE}/api/ai/buffer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId,
-        access_token: accessToken,
-        target_energy: targetEnergy,
-        session_history: sessionHistory,
-        current_z_sequence: currentZSequence,
-      }),
-    })
-      .then((response) => (response.ok ? response.json() : Promise.reject(response)))
-      .then(({ session_id: nextSessionId }) => {
-        if (nextSessionId) setSessionId(nextSessionId);
-      })
-      .catch((error) => {
-        bufferedSequenceKey.current = null;
-        console.error('[Arc-Stream] Queue refill failed:', error);
-      });
-  }, [accessToken, currentZSequence, sessionHistory, sessionId, setSessionId, targetEnergy]);
-
-  // Silent token refresh — no longer keyed on a refreshToken field in state,
-  // just on expiresAt. The cookie backing this call may still be valid
-  // for up to 3 months, so this timer keeps re-arming itself indefinitely
-  // across the whole session as long as the cookie hasn't expired or been cleared.
+  // Silent token refresh
   useEffect(() => {
     if (!expiresAt) return;
     const delay = expiresAt - Date.now() - 60_000;
@@ -249,7 +334,70 @@ const DashboardPage = () => {
     }, delay);
 
     return () => clearTimeout(timer);
-  }, [clearTokens, expiresAt, updateAccessToken]);
+  }, [expiresAt]);
+
+  // Resolve the playing track's 7D vector for the radar chart
+  const currentTrackId = currentTrack?.id;
+  useEffect(() => {
+    if (!currentTrackId) return;
+    let cancelled = false;
+    fetchTrackVectors([currentTrackId])
+      .then((map) => { if (!cancelled) setCurrentVector(map[currentTrackId] ?? null); })
+      .catch((err) => {
+        console.error('[Arc-Stream] Vector lookup failed:', err);
+        if (!cancelled) setCurrentVector(null);
+      });
+    return () => { cancelled = true; };
+  }, [currentTrackId]);
+
+  // ── Queue the next AI-predicted track ───────────────────────────────────────
+  const handleQueueNextTrack = async () => {
+    if (queueInFlightRef.current) return;
+    queueInFlightRef.current = true;
+    setQueueStatus({ kind: 'loading', msg: 'Asking the LSTM for the next track…' });
+
+    try {
+      const st = usePlayerStore.getState();
+
+      const contextIds = st.sessionHistory.slice(-SEQ_LEN);
+      if (contextIds.length === 0) {
+        throw new Error('Play a track first — the LSTM needs at least one track of context.');
+      }
+
+      const vecMap = await fetchTrackVectors(contextIds);
+      const zSeq = contextIds.map((id) => vecMap[id]).filter(Boolean);
+      if (zSeq.length === 0) {
+        throw new Error('None of the recent tracks exist in the catalogue.');
+      }
+      // Server requires 5–9 vectors: left-pad a short history with its oldest vector.
+      while (zSeq.length < MIN_SEQ_LEN) zSeq.unshift(zSeq[0]);
+
+      // Exclude played AND already-buffered tracks so the engine can't re-pick them.
+      const exclusions = [...new Set([...st.sessionHistory, ...st.upcomingQueue.map((t) => t.track_id)])];
+
+      const { tracks } = await requestBuffer({
+        session_id:         st.sessionId,
+        access_token:       usePlayerStore.getState().accessToken, // freshest token
+        target_energy:      st.targetEnergy,
+        session_history:    exclusions,
+        current_z_sequence: zSeq,
+      });
+
+      const store = usePlayerStore.getState();
+      store.enqueueUpcoming(tracks);
+      store.setCurrentZSequence(zSeq);
+      store.setPredictedVector(tracks[tracks.length - 1]?.predicted_vector ?? null);
+
+      setQueueStatus({ kind: 'ok', msg: `Queued “${tracks[0]?.track_name ?? 'track'}”` });
+    } catch (err) {
+      console.error('[Arc-Stream] Queue next failed:', err);
+      setQueueStatus({ kind: 'error', msg: err.message });
+    } finally {
+      queueInFlightRef.current = false;
+    }
+  };
+
+  const remainingMs = useAutoDJ(isAutoDJEnabled, handleQueueNextTrack);
 
   const handleActivate = async () => {
     try {
@@ -260,76 +408,117 @@ const DashboardPage = () => {
   };
 
   const handleLogout = async () => {
-    await logoutRequest();       // clears the 3-month cookie server-side
-    clearTokens();                // clears local access_token/expiresAt
+    await logoutRequest();
+    clearTokens();
     window.location.replace('/');
   };
+
+  const historyTracks = sessionHistory
+    .slice().reverse().slice(0, 50)
+    .map((id) => ({ id, name: id, artists: '', ...trackMeta[id] }));
+
+  const loading = queueStatus.kind === 'loading';
 
   return (
     <div style={s.page}>
 
+      {/* 1 ─ Top bar: logo, SDK/active-device status, actions */}
       <header style={s.header}>
         <span style={s.logo}>ARC-STREAM</span>
-        <div style={s.headerRight}>
-          <span style={s.statusLabel}>
-            {isActive ? 'LIVE' : deviceId ? 'READY' : 'CONNECTING'}
-          </span>
+
+        <div style={s.statusPill(isActive)}>
           <span style={s.statusDot(isActive)} />
-          <button style={s.playlistBtn} onClick={() => setShowGenerator(true)}>? Generate Playlist</button>
-          <button style={s.logoutBtn} onClick={handleLogout}>Log out</button>
+          <span style={s.statusText}>
+            {isActive ? 'LIVE · Arc-Stream device active'
+              : deviceId ? 'READY · transfer playback to start'
+              : 'CONNECTING · initialising Web Playback SDK'}
+          </span>
+          {deviceId && !isActive && (
+            <button style={s.activateBtn} onClick={handleActivate}>⚡ Activate</button>
+          )}
+        </div>
+
+        <div style={s.headerRight}>
+          <button style={s.ghostBtn} onClick={() => setPlannerOpen(true)}>Playlist planner</button>
+          <button style={s.ghostBtn} onClick={handleLogout}>Log out</button>
         </div>
       </header>
 
-      <main style={s.main}>
-        {isActive ? (
-          <div style={s.playerView}>
+      <main style={s.grid}>
 
-            <NowPlaying />
+        {/* 2 ─ Left/main pane: artwork, controller, target energy, Auto-DJ */}
+        <div style={s.col}>
+          <NowPlaying />
 
+          <div style={s.panel}>
             <div style={s.energyWrap}>
               <div style={s.energyHeader}>
                 <span style={s.energyLabel}>TARGET ENERGY</span>
                 <span style={s.energyValue}>{targetEnergy.toFixed(2)}</span>
               </div>
-
               <input
                 type="range" min={0} max={1} step={0.01}
                 value={targetEnergy}
                 onChange={(e) => setTargetEnergy(parseFloat(e.target.value))}
                 style={s.slider}
               />
-
               <div style={s.sliderTicks}>
-                <span>Chill</span>
-                <span>Mid</span>
-                <span>Hype</span>
+                <span>Chill</span><span>Mid</span><span>Hype</span>
               </div>
             </div>
 
-            <UpNextQueue />
+            <Switch
+              checked={isAutoDJEnabled}
+              onChange={setIsAutoDJEnabled}
+              label="Auto-DJ Continuous Mode"
+              hint={remainingMs !== null
+                ? `Queues at 0:25 if the AI queue is empty — ${fmtTime(remainingMs)} left`
+                : 'Queues the next track when ≤ 25 s remain and the AI queue is empty'}
+            />
 
+            <button
+              style={{ ...s.queueBtn, opacity: !isActive || loading ? 0.5 : 1 }}
+              onClick={handleQueueNextTrack} disabled={!isActive || loading}
+            >
+              {loading ? 'Predicting…' : 'Queue next track now'}
+            </button>
+
+            {queueStatus.msg && <p style={s.status(queueStatus.kind)}>{queueStatus.msg}</p>}
           </div>
-        ) : (
-          <div style={s.activateWrap}>
-            <div style={s.icon}>{deviceId ? '🎛️' : '⏳'}</div>
-            <h2 style={s.activateTitle}>
-              {deviceId ? 'Player Ready' : 'Connecting to Spotify…'}
-            </h2>
-            <p style={s.hint}>
-              {deviceId
-                ? 'Transfer playback to Arc-Stream to take control of your queue.'
-                : 'Initialising the Spotify Web Playback SDK in your browser.'}
-            </p>
-            {deviceId && (
-              <button style={s.activateBtn} onClick={handleActivate}>
-                ⚡ Activate Arc-Stream Player
-              </button>
-            )}
-          </div>
-        )}
+        </div>
+
+        {/* 3 ─ Center pane: current track vs predicted ẑ */}
+        <div style={s.panel}>
+          <span style={s.sectionLabel}>ACOUSTIC VECTOR · 7D</span>
+          <VectorRadarChart currentTrackVector={currentVector} predictedVector={predictedVector} />
+        </div>
+
+        {/* 4 ─ Right pane: queue tray */}
+        <div style={s.panel}>
+          <QueueTray
+            sessionHistory={historyTracks}
+            upcomingQueue={upcomingQueue}
+            currentEnergy={currentVector?.[1]}
+            currentTrackId={currentTrackId}
+          />
+        </div>
       </main>
 
-      {showGenerator && <PlaylistGenerator onClose={() => setShowGenerator(false)} />}
+      {/* 5 ─ Modal/drawer: TrajectoryGraph + PlaylistGenerator */}
+      {plannerOpen && (
+        <PlannerDrawer
+          onClose={() => setPlannerOpen(false)}
+          generatedTracks={generatedTracks}
+          onOpenGenerator={() => setGeneratorOpen(true)}
+        />
+      )}
+      {generatorOpen && (
+        <PlaylistGenerator
+          accessToken={accessToken}
+          onClose={() => setGeneratorOpen(false)}
+          onGenerated={(tracks) => setGeneratedTracks(tracks ?? [])}
+        />
+      )}
     </div>
   );
 };
@@ -337,103 +526,118 @@ const DashboardPage = () => {
 // ════════════════════════════════════════════════════════════════════════════
 // STYLES
 // ════════════════════════════════════════════════════════════════════════════
+const GREEN = '#1DB954';
+const WHITE = '#FFFFFF';
+const MUTED = '#B3B3B3';
+const CARD  = '#181818';
+const LINE  = '#282828';
+
 const s = {
   page: {
-    minHeight: '100vh', backgroundColor: '#090910',
-    color: '#f3f4f6', display: 'flex', flexDirection: 'column',
+    minHeight: '100vh', backgroundColor: '#121212',
+    color: WHITE, display: 'flex', flexDirection: 'column',
   },
   header: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '20px 40px', borderBottom: '1px solid #111118',
+    flexWrap: 'wrap', gap: 12, padding: '16px 24px', borderBottom: `1px solid ${LINE}`,
   },
-  logo: { fontSize: 13, fontWeight: 800, letterSpacing: '5px', color: '#1DB954' },
-  headerRight: { display: 'flex', alignItems: 'center', gap: 14 },
-  statusLabel: { fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#6b7280' },
-  statusDot: (active) => ({
-    width: 8, height: 8, borderRadius: '50%',
-    backgroundColor: active ? '#1DB954' : '#374151',
-    boxShadow: active ? '0 0 8px #1DB954' : 'none',
-    transition: 'all 0.4s ease',
-  }),
-  playlistBtn: {
-    background: '#1DB954', border: 'none', color: '#000',
-    fontSize: 10, fontWeight: 800, letterSpacing: '1px',
+  logo: { fontSize: 13, fontWeight: 800, letterSpacing: '5px', color: GREEN },
+  headerRight: { display: 'flex', alignItems: 'center', gap: 10 },
+  ghostBtn: {
+    background: 'none', border: '1px solid #333', color: MUTED,
+    fontSize: 10, fontWeight: 700, letterSpacing: '1px',
     padding: '6px 14px', borderRadius: 20, cursor: 'pointer',
   },
-  logoutBtn: {
-    background: 'none', border: '1px solid #2a2a3a', color: '#6b7280',
-    fontSize: 10, fontWeight: 700, letterSpacing: '1px',
-    padding: '5px 12px', borderRadius: 20, cursor: 'pointer',
-  },
-  main: {
-    flex: 1, display: 'flex',
-    alignItems: 'center', justifyContent: 'center',
-    padding: '24px 0',
-  },
-  activateWrap: {
-    display: 'flex', flexDirection: 'column',
-    alignItems: 'center', gap: 16,
-    textAlign: 'center', maxWidth: 380, padding: '0 24px',
-  },
-  icon:          { fontSize: 48 },
-  activateTitle: { margin: 0, fontSize: 22, fontWeight: 700, color: '#f3f4f6' },
-  hint:          { margin: 0, color: '#6b7280', fontSize: 14, lineHeight: 1.7 },
+  statusPill: (active) => ({
+    display: 'flex', alignItems: 'center', gap: 10,
+    padding: '6px 14px', background: CARD, borderRadius: 20,
+    border: `1px solid ${active ? 'rgba(29,185,84,0.5)' : LINE}`,
+  }),
+  statusText: { fontSize: 11, fontWeight: 700, letterSpacing: '1px', color: MUTED },
+  statusDot: (active) => ({
+    width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+    backgroundColor: active ? GREEN : '#535353',
+    boxShadow: active ? `0 0 8px ${GREEN}` : 'none',
+    transition: 'all 0.4s ease',
+  }),
   activateBtn: {
-    marginTop: 8, backgroundColor: '#1DB954', color: '#000',
-    border: 'none', padding: '14px 36px', borderRadius: 50,
-    fontSize: 13, fontWeight: 800, letterSpacing: '1px', cursor: 'pointer',
+    backgroundColor: GREEN, color: '#000', border: 'none',
+    padding: '5px 14px', borderRadius: 50,
+    fontSize: 11, fontWeight: 800, letterSpacing: '1px', cursor: 'pointer',
   },
-  playerView: {
-    display: 'flex', flexDirection: 'column',
-    alignItems: 'center', gap: 32,
-    padding: '0 24px', width: '100%',
-    maxWidth: 420, margin: '0 auto', boxSizing: 'border-box',
+
+  // auto-fit: three columns when there's room, wraps to fewer on narrow screens
+  grid: {
+    display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+    gap: 20, alignItems: 'start', padding: 24, boxSizing: 'border-box', width: '100%',
   },
+  col: { display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 },
+  panel: {
+    background: CARD, border: `1px solid ${LINE}`, borderRadius: 16,
+    padding: 24, display: 'flex', flexDirection: 'column', gap: 18,
+    boxSizing: 'border-box', minWidth: 0,
+  },
+  sectionLabel: { fontSize: 10, fontWeight: 700, letterSpacing: '3px', color: MUTED, textAlign: 'left' },
+
   card: {
-    display: 'flex', flexDirection: 'column',
-    alignItems: 'center', gap: 24,
-    padding: '36px 44px', background: '#111118',
-    borderRadius: 20, border: '1px solid #1a1a2e',
-    width: '100%', boxSizing: 'border-box',
+    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20,
+    padding: '28px 32px', background: CARD,
+    borderRadius: 16, border: `1px solid ${LINE}`, boxSizing: 'border-box',
   },
-  art: {
-    width: 220, height: 220, borderRadius: 12, objectFit: 'cover',
-    boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
-  },
+  art: { width: 200, height: 200, borderRadius: 10, objectFit: 'cover', boxShadow: '0 20px 60px rgba(0,0,0,0.6)' },
   artPlaceholder: {
-    width: 220, height: 220, borderRadius: 12, background: '#1a1a2e',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: 56, color: '#374151',
+    width: 200, height: 200, borderRadius: 10, background: LINE,
+    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 56, color: MUTED,
   },
   meta:    { textAlign: 'center', width: '100%' },
-  track:   { margin: '0 0 6px', fontSize: 17, fontWeight: 700, color: '#f3f4f6' },
-  artist:  { margin: 0, fontSize: 13, color: '#9ca3af' },
+  track:   { margin: '0 0 6px', fontSize: 17, fontWeight: 700, color: WHITE },
+  artist:  { margin: 0, fontSize: 13, color: MUTED },
   controls:{ display: 'flex', alignItems: 'center', gap: 24 },
-  btn: {
-    background: 'none', border: 'none',
-    color: '#9ca3af', fontSize: 22, cursor: 'pointer', padding: 8,
-  },
+  btn: { background: 'none', border: 'none', color: MUTED, fontSize: 22, cursor: 'pointer', padding: 8 },
   playBtn: {
-    width: 52, height: 52, borderRadius: '50%',
-    background: '#1DB954', border: 'none', color: '#000',
-    fontSize: 20, display: 'flex', alignItems: 'center',
-    justifyContent: 'center', cursor: 'pointer', fontWeight: 800,
+    width: 52, height: 52, borderRadius: '50%', background: GREEN, border: 'none', color: '#000',
+    fontSize: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontWeight: 800,
   },
+
   energyWrap: { width: '100%', display: 'flex', flexDirection: 'column', gap: 10 },
   energyHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
-  energyLabel: { fontSize: 10, fontWeight: 700, letterSpacing: '3px', color: '#6b7280' },
-  energyValue: { fontSize: 13, fontWeight: 700, color: '#1DB954', fontFamily: 'monospace' },
-  slider: { width: '100%', accentColor: '#1DB954', cursor: 'pointer', height: 4 },
-  sliderTicks: {
-    display: 'flex', justifyContent: 'space-between',
-    fontSize: 11, color: '#374151',
+  energyLabel: { fontSize: 10, fontWeight: 700, letterSpacing: '3px', color: MUTED },
+  energyValue: { fontSize: 13, fontWeight: 700, color: GREEN, fontFamily: 'monospace' },
+  slider: { width: '100%', accentColor: GREEN, cursor: 'pointer', height: 4 },
+  sliderTicks: { display: 'flex', justifyContent: 'space-between', fontSize: 11, color: MUTED },
+
+  switchRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, textAlign: 'left' },
+  switchLabel: { fontSize: 13, fontWeight: 700, color: WHITE },
+  switchHint: { fontSize: 11, color: MUTED, marginTop: 2, fontFamily: 'monospace', lineHeight: 1.5 },
+  switchTrack: (on) => ({
+    width: 44, height: 24, borderRadius: 12, border: 'none', padding: 2, cursor: 'pointer',
+    background: on ? GREEN : '#535353', transition: 'background 0.2s', flexShrink: 0,
+    display: 'flex', alignItems: 'center', justifyContent: on ? 'flex-end' : 'flex-start',
+  }),
+  switchKnob: { width: 20, height: 20, borderRadius: '50%', background: WHITE, display: 'block' },
+
+  queueBtn: {
+    background: 'none', border: `1px solid ${GREEN}`, color: GREEN, borderRadius: 50,
+    padding: '10px 20px', fontSize: 12, fontWeight: 800, letterSpacing: '1px', cursor: 'pointer',
   },
-  queuePlaceholder: {
-    width: '100%', padding: '20px',
-    border: '1px dashed #1a1a2e', borderRadius: 12,
-    textAlign: 'center', boxSizing: 'border-box',
+  status: (kind) => ({
+    margin: 0, fontSize: 12, lineHeight: 1.5, textAlign: 'left',
+    color: kind === 'error' ? '#FF6B6B' : kind === 'ok' ? GREEN : MUTED,
+  }),
+
+  overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 10 },
+  drawer: {
+    position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(460px, 100vw)', zIndex: 11,
+    background: CARD, borderLeft: `1px solid ${LINE}`, padding: 24, boxSizing: 'border-box',
+    overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 20,
   },
-  queueHint: { margin: 0, color: '#374151', fontSize: 12, lineHeight: 1.6 },
+  drawerHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  curveRow: { display: 'flex', gap: 8, justifyContent: 'center' },
+  pill: (on) => ({
+    background: on ? GREEN : 'none', color: on ? '#000' : MUTED,
+    border: `1px solid ${on ? GREEN : '#333'}`, borderRadius: 20,
+    padding: '6px 16px', fontSize: 11, fontWeight: 800, letterSpacing: '1px', cursor: 'pointer',
+  }),
 };
 
 export default DashboardPage;
