@@ -251,3 +251,26 @@ async def predict_queue(payload: QueuePredictRequest) -> dict[str, object]:
         "seeds_used": seeds_used,
         "padded": padded,
     }
+
+@app.get("/search_tracks")
+def search_tracks(q:str=Query(...,min_length=1),limit:int=10,db: Session = Depends(database.get_db)):
+    """search database for tracks matching the query string"""
+    results = db.query(models.Trackfeatures).filter(
+        or_(
+            models.Trackfeatures.track_name.ilike(f"%{q}%"),
+            models.Trackfeatures.artists.ilike(f"%{q}%")
+        )
+    ).limit(limit).all()
+
+    return {
+        "tracks":[
+            {
+                "track_id": t.track_id,
+                "track_name": t.track_name,
+                "artist_name": t.artist_name,
+                "energy": round(t.energy, 3),
+                "valence": round(t.valence, 3),
+                "tempo": round(t.tempo, 1)
+            }
+        ]
+    }
