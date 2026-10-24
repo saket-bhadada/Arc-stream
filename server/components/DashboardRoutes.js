@@ -453,17 +453,17 @@ router.post('/queue-commit', async (req, res) => {
   });
 });
 
-router.get('/search-seeds',async(req,res)=>{
+router.get('/search-seeds', async (req, res) => {
   try {
-    const {q} = req.query;
-    if(!q) return res.json({tracks:[]});
+    const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (!query) return res.json({ tracks: [] });
 
-    const mlResponse = await axios.get(`${ML_SERVICE_URL}/search_tracks`,{params:{q},limits:8});
-    res.json(mlResponse.data);
-  }
-  catch(error){
-    console.error('[Search Seeds] Error:',error.message);
-    res.status(502).json({error:'Failed to fetch search seeds',detail:error.message});
+    const searchParams = new URLSearchParams({ q: query, limit: '8' });
+    const results = await mlFetch(`/search_tracks?${searchParams}`);
+    return res.json(results);
+  } catch (error) {
+    console.error('[Search Seeds] Error:', error.message);
+    return res.status(502).json({ error: 'Failed to fetch search seeds', detail: error.message });
   }
 });
 

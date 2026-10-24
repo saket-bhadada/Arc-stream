@@ -46,6 +46,19 @@ def predict_next_z_vector(
 
     return [float(x) for x in predicted_vec]
 
+def load_model(weights_path=None) -> ArcStreamLSTM:
+    """Compatibility wrapper used by main.py's lifespan. Uses WEIGHTS_PATH from config."""
+    return load_inference_model()
+
+def predict_next_latent_vector(
+    model,
+    sequence_history: List[List[float]],
+    target_energy: float
+) -> List[float]:
+    """Compatibility wrapper used by main.py endpoints."""
+    return predict_next_z_vector(list(sequence_history), target_energy)
+
+
 def predict_anchored_z_vector(
     rolling_sequence: List[List[float]],
     seed_vectors: List[List[float]],

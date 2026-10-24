@@ -333,21 +333,22 @@ async def predict_queue(payload: QueuePredictRequest) -> dict[str, object]:
     }
 
 @app.get("/search_tracks")
-def search_tracks(q:str=Query(...,min_length=1),limit:int=10,db: Session = Depends(database.get_db)):
+def search_tracks(q: str = Query(..., min_length=1), limit: int = 10, db: Session = Depends(database.get_db)):
     """search database for tracks matching the query string"""
-    results = db.query(models.Trackfeatures).filter(
+    safe_limit = max(1, min(limit, 50))
+    results = db.query(models.TrackFeature).filter(
         or_(
-            models.Trackfeatures.track_name.ilike(f"%{q}%"),
-            models.Trackfeatures.artists.ilike(f"%{q}%")
+            models.TrackFeature.track_name.ilike(f"%{q}%"),
+            models.TrackFeature.artists.ilike(f"%{q}%")
         )
-    ).limit(limit).all()
+    ).limit(safe_limit).all()
 
     return {
         "tracks":[
             {
-                "track_id": t.track_id,
+                "track_id": t.id,
                 "track_name": t.track_name,
-                "artist_name": t.artist_name,
+                "artist_name": t.artists,
                 "energy": round(t.energy, 3),
                 "valence": round(t.valence, 3),
                 "tempo": round(t.tempo, 1)

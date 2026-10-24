@@ -12,3 +12,7 @@ LATENT_DIM   = len(FEATURE_COLS)   # 7
 LSTM_INPUT   = LATENT_DIM + 1       # 7 features + 1 target_energy = 8
 LSTM_HIDDEN  = 128
 LSTM_LAYERS  = 2
+CONDITIONED_INPUT_DIM = LSTM_INPUT   # features + target_energy
+
+import os
+WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), 'weights', 'arc_stream_lstm.pth')

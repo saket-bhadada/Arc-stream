@@ -1,8 +1,8 @@
 // client/src/components/PlaylistGenerator.jsx
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { usePlayerStore } from '../store/playerStore';
 
-const NODE_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const NODE_BASE = import.meta.env.VITE_NODE_BASE ?? 'http://127.0.0.1:3000';
 
 const previewCurve = (startEnergy, targetEnergy, curveType, points = 24) => {
   const out = [];
@@ -63,19 +63,12 @@ const CURVE_TYPES = [
   },
 ];
 
-const TRACK_COUNT_PRESETS = [5, 10, 15, 20];
-
-const CurvePreview = ({ startEnergy, targetEnergy, curveType }) => {
-  const points = useMemo(
-    () => previewCurve(startEnergy, targetEnergy, curveType),
-    [startEnergy, targetEnergy, curveType]
-  );
-
+const CurvePreview = ({ energyCurve }) => {
   const width = 100;
   const height = 100;
-  const path = points
+  const path = energyCurve
     .map((v, i) => {
-      const x = (i / (points.length - 1)) * width;
+      const x = (i / (energyCurve.length - 1)) * width;
       const y = height - v * height;
       return `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
@@ -101,215 +94,351 @@ const CurvePreview = ({ startEnergy, targetEnergy, curveType }) => {
 };
 
 const PlaylistGenerator = ({ onClose }) => {
-  const { accessToken, sessionHistory } = usePlayerStore();
-
-  const [startEnergy, setStartEnergy]   = useState(0.3);
-  const [targetEnergy, setTargetEnergy] = useState(0.8);
-  const [trackCount, setTrackCount]     = useState(10);
-  const [customCount, setCustomCount]   = useState('');
-  const [curveType, setCurveType]       = useState('linear');
-
+  const accessToken = usePlayerStore((state) => state.accessToken);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [selectedSeeds, setSelectedSeeds] = useState([]);
+  const [trackCount, setTrackCount] = useState(10);
+  const [energyCurve, setEnergyCurve] = useState(() => previewCurve(0.3, 0.8, 'linear', 10));
+  const [playlistName, setPlaylistName] = useState('My Custom Energy Arc');
+  const [generatedTracks, setGeneratedTracks] = useState([]);
+  const [spotifyUrl, setSpotifyUrl] = useState(null);
   const [status, setStatus] = useState('idle');
   const [errorMsg, setErrorMsg] = useState('');
-  const [result, setResult] = useState(null);
+  const [searchError, setSearchError] = useState('');
 
-  const effectiveTrackCount = customCount ? parseInt(customCount, 10) : trackCount;
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (query.length < 2 || selectedSeeds.length >= 5) return undefined;
 
-  const handleTrackCountPreset = (count) => {
-    setTrackCount(count);
-    setCustomCount('');
+    const controller = new AbortController();
+    const timeout = setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `${NODE_BASE}/api/ai/search-seeds?q=${encodeURIComponent(query)}`,
+          { signal: controller.signal },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Search failed (${response.status})`);
+        setSearchResults(Array.isArray(data.tracks) ? data.tracks : []);
+        setSearchError('');
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          setSearchError(error.message || 'Could not search tracks.');
+          setSearchResults([]);
+        }
+      }
+    }, 250);
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [searchQuery, selectedSeeds.length]);
+
+  const handleTrackCountChange = (value) => {
+    const nextCount = Math.max(5, Math.min(25, Math.floor(Number(value) || 5)));
+    setEnergyCurve((previous) => Array.from({ length: nextCount }, (_, index) => {
+      const ratio = nextCount === 1 ? 0 : index / (nextCount - 1);
+      const oldIndex = Math.round(ratio * (previous.length - 1));
+      return previous[oldIndex] ?? 0.5;
+    }));
+    setTrackCount(nextCount);
+    setGeneratedTracks([]);
+    setSpotifyUrl(null);
   };
 
-  const handleCustomCountChange = (e) => {
-    const raw = e.target.value.replace(/[^0-9]/g, '');
-    setCustomCount(raw);
+  const handleSearchChange = (value) => {
+    setSearchQuery(value);
+    if (value.trim().length < 2) {
+      setSearchResults([]);
+      setSearchError('');
+    }
+  };
+
+  const applyPreset = (type) => {
+    const nextCurve = previewCurve(0.25, 0.9, type, trackCount);
+    setEnergyCurve(nextCurve);
+    setGeneratedTracks([]);
+    setSpotifyUrl(null);
+  };
+
+  const updateCurveNode = (index, value) => {
+    setEnergyCurve((previous) => previous.map(
+      (energy, nodeIndex) => nodeIndex === index ? Number(value) : energy,
+    ));
+    setGeneratedTracks([]);
+    setSpotifyUrl(null);
   };
 
   const handleGenerate = async () => {
-    if (!accessToken) {
+    if (selectedSeeds.length !== 5) {
+      setErrorMsg('Select exactly 5 seed tracks to generate a playlist.');
       setStatus('error');
-      setErrorMsg('Not connected to Spotify — log in again.');
-      return;
-    }
-    if (!effectiveTrackCount || effectiveTrackCount < 3 || effectiveTrackCount > 30) {
-      setStatus('error');
-      setErrorMsg('Track count must be between 3 and 30.');
       return;
     }
 
-    setStatus('loading');
+    setStatus('generating');
     setErrorMsg('');
+    setSpotifyUrl(null);
 
     try {
-      const n = effectiveTrackCount;
-      const energyCurve = previewCurve(startEnergy, targetEnergy, curveType, n)
-        .map((v) => Number(v.toFixed(4)));
-
-      const res = await fetch(`${NODE_BASE}/api/ai/playlist`, {
+      const response = await fetch(`${NODE_BASE}/api/ai/generate-playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({
-          access_token:    accessToken,
-          energy_curve:    energyCurve,
-          session_history: sessionHistory.slice(-5),
+          seed_track_ids: selectedSeeds.map((track) => track.track_id),
+          custom_energy_curve: energyCurve.map((value) => Number(value.toFixed(4))),
+          start_energy: energyCurve[0],
+          target_energy: Math.max(...energyCurve),
+          track_count: trackCount,
+          curve_type: 'arc',
         }),
       });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Playlist generation failed');
-
-      setResult({ ...data, spotify_url: data.playlist_url });
-      setStatus('success');
-
-      const { setUpNext, setUpNextStatus, setAnalysis } = usePlayerStore.getState();
-      if (data.tracks && data.tracks.length > 0) {
-        setUpNext(data.tracks.map((t, idx) => ({ ...t, position: idx + 1 })));
-        setUpNextStatus('ready');
-        setAnalysis({
-          track_id: data.tracks[0].track_id,
-          track_name: data.tracks[0].track_name,
-          artists: data.tracks[0].artists,
-          energy: data.tracks[0].energy || targetEnergy,
-          valence: 0.5,
-          danceability: 0.5,
-          tempo: 120,
-        });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail?.message || data.detail || data.error || 'Playlist generation failed.');
       }
-    } catch (err) {
-      console.error('[PlaylistGenerator] Export failed:', err);
+      const tracks = Array.isArray(data.playlist) ? data.playlist : data.tracks;
+      if (!Array.isArray(tracks) || tracks.length === 0) {
+        throw new Error('The generator did not return any tracks.');
+      }
+
+      setGeneratedTracks(tracks);
+      setStatus('ready');
+    } catch (error) {
+      console.error('[PlaylistGenerator] Generation failed:', error);
+      setErrorMsg(error.message || 'Could not generate the playlist.');
       setStatus('error');
-      setErrorMsg(err.message || 'Something went wrong — try again.');
     }
+  };
+
+  const handleExport = async () => {
+    if (!accessToken) {
+      setErrorMsg('Connect to Spotify before exporting your playlist.');
+      setStatus('error');
+      return;
+    }
+    if (generatedTracks.length === 0) {
+      setErrorMsg('Generate a playlist before exporting it.');
+      setStatus('error');
+      return;
+    }
+
+    setStatus('exporting');
+    setErrorMsg('');
+    try {
+      const response = await fetch(`${NODE_BASE}/api/ai/export-playlist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          access_token: accessToken,
+          playlist_name: playlistName,
+          energy_curve: energyCurve,
+          tracks: generatedTracks,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail?.message || data.detail || data.error || 'Playlist export failed.');
+      }
+
+      setSpotifyUrl(data.playlist_url || null);
+      setStatus('ready');
+    } catch (error) {
+      console.error('[PlaylistGenerator] Export failed:', error);
+      setErrorMsg(error.message || 'Could not export the playlist.');
+      setStatus('error');
+    }
+  };
+
+  const addSeed = (track) => {
+    setSelectedSeeds((seeds) => (
+      seeds.length >= 5 || seeds.some((seed) => seed.track_id === track.track_id)
+        ? seeds
+        : [...seeds, track]
+    ));
+    setSearchQuery('');
+    setSearchResults([]);
+    setGeneratedTracks([]);
+    setSpotifyUrl(null);
+  };
+
+  const removeSeed = (trackId) => {
+    setSelectedSeeds((seeds) => seeds.filter((seed) => seed.track_id !== trackId));
+    setGeneratedTracks([]);
+    setSpotifyUrl(null);
   };
 
   return (
     <div style={s.overlay} onClick={onClose}>
       <div style={s.modal} onClick={(e) => e.stopPropagation()}>
-
         <div style={s.header}>
-          <span style={s.title}>Generate energy playlist</span>
+          <span style={s.title}>Custom energy playlist</span>
           <button style={s.closeBtn} onClick={onClose} aria-label="Close">×</button>
         </div>
 
-        {status === 'success' && result ? (
-          <div style={s.successWrap}>
-            <div style={s.successIcon}>✓</div>
-            <p style={s.successTitle}>Playlist exported to Spotify</p>
-            <p style={s.successHint}>{result.tracks.length} tracks, {curveType} curve</p>
+        <div style={s.block}>
+          <span style={s.blockLabel}>1. Choose five seed tracks ({selectedSeeds.length}/5)</span>
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(event) => handleSearchChange(event.target.value)}
+            placeholder={selectedSeeds.length === 5 ? 'Five seeds selected' : 'Search track or artist'}
+            disabled={selectedSeeds.length === 5}
+            style={{ ...s.customCountInput, width: '100%', boxSizing: 'border-box', textAlign: 'left' }}
+          />
+          {searchError && <p style={s.errorText}>{searchError}</p>}
+          {searchResults.length > 0 && (
+            <div style={s.searchResults}>
+              {searchResults.map((track) => (
+                <button
+                  key={track.track_id}
+                  type="button"
+                  onClick={() => addSeed(track)}
+                  style={s.searchResult}
+                >
+                  <span>
+                    {track.track_name}
+                    <small style={s.searchArtist}> — {track.artist_name}</small>
+                  </span>
+                  <span style={s.searchEnergy}>
+                    {Math.round((track.energy || 0) * 100)}%
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={s.seedList}>
+            {selectedSeeds.map((seed, index) => (
+              <div key={seed.track_id} style={s.seedPill}>
+                <span>#{index + 1} {seed.track_name}</span>
+                <button
+                  type="button"
+                  onClick={() => removeSeed(seed.track_id)}
+                  aria-label={`Remove ${seed.track_name}`}
+                  style={s.removeSeed}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
 
-            {result.spotify_url && (
-              <a href={result.spotify_url} target="_blank" rel="noreferrer" style={s.spotifyLink}>
-                Open in Spotify
-              </a>
-            )}
+        <div style={s.block}>
+          <div style={s.curveHeader}>
+            <span style={s.blockLabel}>2. Set the energy curve</span>
+            <label style={s.countControl}>
+              Tracks
+              <input
+                type="number"
+                min="5"
+                max="25"
+                step="1"
+                value={trackCount}
+                onChange={(event) => handleTrackCountChange(event.target.value)}
+                style={s.countInput}
+              />
+            </label>
+          </div>
+          <div style={s.presetRow}>
+            {CURVE_TYPES.map((curve) => (
+              <button
+                key={curve.id}
+                type="button"
+                onClick={() => applyPreset(curve.id)}
+                style={s.presetButton}
+              >
+                {curve.label}
+              </button>
+            ))}
+          </div>
+          <CurvePreview energyCurve={energyCurve} />
+          <div style={s.curveNodes}>
+            {energyCurve.map((value, index) => (
+              <label key={index} style={s.curveNode}>
+                <span style={s.sliderValue}>{Math.round(value * 100)}%</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={value}
+                  aria-label={`Energy for track ${index + 1}`}
+                  onChange={(event) => updateCurveNode(index, event.target.value)}
+                  style={s.verticalSlider}
+                />
+                <span style={s.trackPos}>{index + 1}</span>
+              </label>
+            ))}
+          </div>
+        </div>
 
+        <div style={s.block}>
+          <span style={s.blockLabel}>3. Playlist details</span>
+          <input
+            type="text"
+            value={playlistName}
+            maxLength={100}
+            onChange={(event) => setPlaylistName(event.target.value)}
+            placeholder="Playlist name"
+            style={{ ...s.customCountInput, width: '100%', boxSizing: 'border-box', textAlign: 'left' }}
+          />
+        </div>
+
+        {status === 'error' && <p style={s.errorText}>{errorMsg}</p>}
+        {status === 'generating' && <p style={s.statusText}>Generating playlist…</p>}
+        {status === 'exporting' && <p style={s.statusText}>Exporting to Spotify…</p>}
+        {spotifyUrl && (
+          <p style={s.spotifyNotice}>
+            Exported to Spotify.{' '}
+            <a href={spotifyUrl} target="_blank" rel="noreferrer" style={s.spotifyInlineLink}>
+              Open playlist
+            </a>
+          </p>
+        )}
+
+        <div style={s.actionRow}>
+          <button
+            type="button"
+            style={{ ...s.secondaryBtn, ...(status === 'generating' || status === 'exporting' ? s.disabledBtn : {}) }}
+            onClick={handleGenerate}
+            disabled={status === 'generating' || status === 'exporting' || selectedSeeds.length !== 5}
+          >
+            {status === 'generating' ? 'Generating…' : 'Preview playlist'}
+          </button>
+          <button
+            type="button"
+            style={{ ...s.generateBtn, ...(status === 'generating' || status === 'exporting' ? s.generateBtnLoading : {}) }}
+            onClick={handleExport}
+            disabled={status === 'generating' || status === 'exporting' || generatedTracks.length === 0 || !accessToken}
+          >
+            {status === 'exporting' ? 'Exporting…' : 'Export to Spotify'}
+          </button>
+        </div>
+
+        {generatedTracks.length > 0 && (
+          <div style={s.block}>
+            <span style={s.blockLabel}>Generated playlist ({generatedTracks.length} tracks)</span>
             <div style={s.trackPreviewList}>
-              {result.tracks.map((t) => (
-                <div key={`${t.track_id}-${t.position}`} style={s.trackRow}>
-                  <span style={s.trackPos}>{t.position + 1}</span>
-                  <span style={s.trackName}>{t.track_name || t.track_id}</span>
+              {generatedTracks.map((track, index) => (
+                <div key={track.track_id} style={s.trackRow}>
+                  <span style={s.trackPos}>{index + 1}</span>
+                  <span style={s.trackName}>
+                    {track.track_name || track.track_id}
+                    {track.artist_name && <small style={s.searchArtist}> — {track.artist_name}</small>}
+                  </span>
                   <span style={s.trackEnergy}>
-                    {t.target_energy?.toFixed(2)}
-                    {typeof t.actual_energy === 'number' && (
-                      <span style={s.trackActualEnergy}> · {t.actual_energy.toFixed(2)}</span>
-                    )}
+                    {typeof track.actual_energy === 'number'
+                      ? `${Math.round(track.actual_energy * 100)}%`
+                      : `${Math.round((track.target_energy || 0) * 100)}%`}
                   </span>
                 </div>
               ))}
             </div>
-
-            <button style={s.doneBtn} onClick={onClose}>Done</button>
           </div>
-        ) : (
-          <>
-            <CurvePreview startEnergy={startEnergy} targetEnergy={targetEnergy} curveType={curveType} />
-
-            <div style={s.sliderBlock}>
-              <div style={s.sliderHeader}>
-                <span style={s.sliderLabel}>Start energy</span>
-                <span style={s.sliderValue}>{startEnergy.toFixed(2)}</span>
-              </div>
-              <input
-                type="range" min={0} max={1} step={0.01}
-                value={startEnergy}
-                onChange={(e) => setStartEnergy(parseFloat(e.target.value))}
-                style={s.slider}
-              />
-            </div>
-
-            <div style={s.sliderBlock}>
-              <div style={s.sliderHeader}>
-                <span style={s.sliderLabel}>Peak / target energy</span>
-                <span style={s.sliderValue}>{targetEnergy.toFixed(2)}</span>
-              </div>
-              <input
-                type="range" min={0} max={1} step={0.01}
-                value={targetEnergy}
-                onChange={(e) => setTargetEnergy(parseFloat(e.target.value))}
-                style={s.slider}
-              />
-            </div>
-
-            <div style={s.block}>
-              <span style={s.blockLabel}>Curve shape</span>
-              <div style={s.curveToggleRow}>
-                {CURVE_TYPES.map((c) => {
-                  const active = curveType === c.id;
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => setCurveType(c.id)}
-                      style={{ ...s.curveToggle, ...(active ? s.curveToggleActive : {}) }}
-                    >
-                      {c.glyph(active ? '#000' : '#9ca3af')}
-                      <span style={{ color: active ? '#000' : '#9ca3af' }}>{c.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div style={s.block}>
-              <span style={s.blockLabel}>Track count</span>
-              <div style={s.countRow}>
-                {TRACK_COUNT_PRESETS.map((count) => {
-                  const active = !customCount && trackCount === count;
-                  return (
-                    <button
-                      key={count}
-                      onClick={() => handleTrackCountPreset(count)}
-                      style={{ ...s.countPill, ...(active ? s.countPillActive : {}) }}
-                    >
-                      {count}
-                    </button>
-                  );
-                })}
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="Custom"
-                  value={customCount}
-                  onChange={handleCustomCountChange}
-                  style={s.customCountInput}
-                />
-              </div>
-            </div>
-
-            {status === 'error' && (
-              <p style={s.errorText}>{errorMsg}</p>
-            )}
-
-            <button
-              style={{ ...s.generateBtn, ...(status === 'loading' ? s.generateBtnLoading : {}) }}
-              onClick={handleGenerate}
-              disabled={status === 'loading'}
-            >
-              {status === 'loading' ? 'Generating…' : 'Generate & export to Spotify'}
-            </button>
-          </>
         )}
-
       </div>
     </div>
   );
@@ -351,6 +480,66 @@ const s = {
   sliderValue: { fontSize: 13, fontWeight: 700, color: '#1DB954', fontFamily: 'monospace' },
   slider: { width: '100%', accentColor: '#1DB954', cursor: 'pointer', height: 4 },
   block: { marginBottom: 22 },
+  searchResults: {
+    maxHeight: 180, overflowY: 'auto', marginTop: 6,
+    border: '1px solid #1a1a2e', borderRadius: 10, backgroundColor: '#090910',
+  },
+  searchResult: {
+    width: '100%', display: 'flex', justifyContent: 'space-between', gap: 10,
+    padding: '10px 12px', border: 0, borderBottom: '1px solid #1a1a2e',
+    background: 'transparent', color: '#f3f4f6', textAlign: 'left', cursor: 'pointer',
+  },
+  searchArtist: { color: '#9ca3af', fontSize: 11 },
+  searchEnergy: { color: '#1DB954', whiteSpace: 'nowrap', fontSize: 11 },
+  seedList: { display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  seedPill: {
+    display: 'flex', alignItems: 'center', gap: 8, maxWidth: '100%',
+    padding: '6px 10px', border: '1px solid #1DB954', borderRadius: 20,
+    backgroundColor: '#090910', color: '#f3f4f6', fontSize: 12,
+  },
+  removeSeed: {
+    padding: 0, border: 0, background: 'transparent', color: '#f87171',
+    fontSize: 18, lineHeight: 1, cursor: 'pointer',
+  },
+  curveHeader: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
+  },
+  countControl: { display: 'flex', alignItems: 'center', gap: 8, color: '#9ca3af', fontSize: 12 },
+  countInput: {
+    width: 56, padding: '6px 8px', borderRadius: 8, border: '1px solid #2a2a3a',
+    backgroundColor: '#090910', color: '#f3f4f6',
+  },
+  presetRow: { display: 'flex', gap: 8, marginBottom: 10 },
+  presetButton: {
+    flex: 1, padding: '7px 8px', borderRadius: 20, border: '1px solid #2a2a3a',
+    backgroundColor: '#090910', color: '#9ca3af', fontSize: 11, cursor: 'pointer',
+  },
+  curveNodes: {
+    display: 'flex', alignItems: 'stretch', gap: 6, height: 122, overflowX: 'auto',
+    padding: '12px 8px', border: '1px solid #1a1a2e', borderRadius: 10,
+    backgroundColor: '#090910', boxSizing: 'border-box',
+  },
+  curveNode: {
+    flex: '1 0 20px', minWidth: 20, display: 'flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'space-between',
+  },
+  verticalSlider: {
+    width: 18, height: 70, margin: 0, accentColor: '#1DB954',
+    writingMode: 'vertical-lr', direction: 'rtl', cursor: 'pointer',
+  },
+  statusText: { color: '#9ca3af', fontSize: 13, margin: '0 0 12px' },
+  spotifyNotice: {
+    padding: 10, margin: '0 0 14px', border: '1px solid #1DB954',
+    borderRadius: 10, backgroundColor: 'rgba(29, 185, 84, 0.12)', fontSize: 13,
+  },
+  spotifyInlineLink: { color: '#1DB954', fontWeight: 700 },
+  actionRow: { display: 'flex', gap: 10, marginBottom: 20 },
+  secondaryBtn: {
+    flex: 1, padding: '12px 10px', border: '1px solid #1DB954', borderRadius: 50,
+    backgroundColor: 'transparent', color: '#f3f4f6', fontSize: 12,
+    fontWeight: 700, cursor: 'pointer',
+  },
+  disabledBtn: { opacity: 0.55, cursor: 'default' },
   blockLabel: {
     display: 'block', fontSize: 12, fontWeight: 700, letterSpacing: '0.5px',
     color: '#9ca3af', marginBottom: 10,
