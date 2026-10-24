@@ -70,7 +70,7 @@ def generate_energy_curve(
     if custom_points and len(custom_points) >=2:
         x_old = np.linspace(0,1,len(custom_points))
         x_new = np.linspace(0,1,count)
-        interpolated = np.intrep(x_new,x_old,custom_points)
+        interpolated = np.interp(x_new,x_old,custom_points)
         return [float(np.clip(val,0.0,1.0)) for val in interpolated]
 
     t = np.linspace(0,1,count)

@@ -6,7 +6,7 @@ import os
 from math import isfinite
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -64,9 +64,13 @@ class BufferRequest(BaseModel):
 
 
 class PlaylistRequest(BaseModel):
-    energy_curve: list[float] = Field(min_length=1)
-    current_z_sequence: list[list[float]] = Field(default_factory=list, max_length=MAX_SEQ_LEN)
-    session_history: list[str] = Field(default_factory=list)
+    seed_track_ids: list[str] = Field(min_length=1, max_length=9)
+    custom_energy_curve: list[float] | None = None
+    start_energy: float = Field(default=0.3, ge=0.0, le=1.0)
+    target_energy: float = Field(default=0.8, ge=0.0, le=1.0)
+    track_count: int = Field(default=12, ge=1, le=30)
+    curve_type: Literal["linear", "arc", "wave"] = "arc"
+    anchor_strength: float = Field(default=0.45, ge=0.0, le=1.0)
 
 
 class QueuePredictRequest(BaseModel):
@@ -155,8 +159,8 @@ async def predict_buffer(payload: BufferRequest) -> dict[str, list[dict[str, obj
 @app.post("/generate_playlist")
 async def generate_playlist(payload: PlaylistRequest,db: Session = Depends(database.get_db)):
     try:
-        seed_rows = db.query(models.Trackfeatures).filter(
-            models.Trackfeatures.track_id.in_(payload.seed_track_ids)
+        seed_rows = db.query(models.TrackFeature).filter(
+            models.TrackFeature.id.in_(payload.seed_track_ids)
         ).all()
 
         if not seed_rows:
@@ -167,14 +171,14 @@ async def generate_playlist(payload: PlaylistRequest,db: Session = Depends(datab
                     "message": "None of the provided seed tracks exist in the dataset.",
                 },
             )
-        seed_map = {row.track_id: row.z_vector for row in seed_rows}
+        seed_map = {row.id: row.z_vector for row in seed_rows}
         ordered_seeds = [seed_map[tid] for tid in payload.seed_track_ids if tid in seed_map]
-        seed_vectors = [[float(x) for x in row.z_vector] for row in ordered_seeds]
+        seed_vectors = [[float(x) for x in vector] for vector in ordered_seeds]
 
         while len(seed_vectors)<5:
             seed_vectors.insert(0,seed_vectors[0])
 
-        energy_tragets = generate_energy_curve(
+        energy_targets = generate_energy_curve(
             start_energy=payload.start_energy,
             target_energy=payload.target_energy,
             count=payload.track_count,
@@ -184,7 +188,7 @@ async def generate_playlist(payload: PlaylistRequest,db: Session = Depends(datab
 
         rolling_seq = list(seed_vectors[-5:])
         excluded_ids = set(payload.seed_track_ids)
-        generate_tracks = []
+        generated_tracks = []
         for step_idx, target_e in enumerate(energy_targets):
             # Predict 7D vector conditioned on the 5-track window, anchored to seeds + target_e
             ideal_z = predict_anchored_z_vector(
@@ -197,7 +201,7 @@ async def generate_playlist(payload: PlaylistRequest,db: Session = Depends(datab
             # Query tracks within a tight energy band first (±0.08) sorted by 7D Euclidean distance
             energy_band = 0.08
             base_query = db.query(models.TrackFeature).filter(
-                ~models.TrackFeature.track_id.in_(excluded_ids)
+                ~models.TrackFeature.id.in_(excluded_ids)
             )
 
             band_match = base_query.filter(
@@ -212,7 +216,7 @@ async def generate_playlist(payload: PlaylistRequest,db: Session = Depends(datab
             ).first()
 
             if match:
-                excluded_ids.add(match.track_id)
+                excluded_ids.add(match.id)
                 match_z = [float(x) for x in match.z_vector]
                 rolling_seq = (rolling_seq + [match_z])[-5:]
 
@@ -220,9 +224,9 @@ async def generate_playlist(payload: PlaylistRequest,db: Session = Depends(datab
                 dist_to_ideal = float(np.linalg.norm(np.array(match_z) - np.array(ideal_z)))
                 generated_tracks.append({
                     "step": step_idx + 1,
-                    "track_id": match.track_id,
+                    "track_id": match.id,
                     "track_name": match.track_name,
-                    "artist_name": match.artist_name,
+                    "artist_name": match.artists,
                     "target_energy": round(target_e, 3),
                     "actual_energy": round(float(match.energy), 3),
                     "vector_distance": round(dist_to_ideal, 4),
@@ -351,4 +355,3 @@ def search_tracks(q:str=Query(...,min_length=1),limit:int=10,db: Session = Depen
             for t in results
         ]
     }
-
