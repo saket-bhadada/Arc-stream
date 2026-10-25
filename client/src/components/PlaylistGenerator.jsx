@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { usePlayerStore } from '../store/playerStore';
 
 const NODE_BASE = import.meta.env.VITE_NODE_BASE ?? 'http://127.0.0.1:3000';
+const API_BASE = `${NODE_BASE}/api/dashboard`;
 
 const previewCurve = (startEnergy, targetEnergy, curveType, points = 24) => {
   const out = [];
@@ -93,7 +94,7 @@ const CurvePreview = ({ energyCurve }) => {
   );
 };
 
-const PlaylistGenerator = ({ onClose }) => {
+const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
   const accessToken = usePlayerStore((state) => state.accessToken);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -115,7 +116,7 @@ const PlaylistGenerator = ({ onClose }) => {
     const timeout = setTimeout(async () => {
       try {
         const response = await fetch(
-          `${NODE_BASE}/api/ai/search-seeds?q=${encodeURIComponent(query)}`,
+          `${API_BASE}/search-seeds?q=${encodeURIComponent(query)}&access_token=${encodeURIComponent(accessToken || '')}`,
           { signal: controller.signal },
         );
         const data = await response.json().catch(() => ({}));
@@ -134,7 +135,7 @@ const PlaylistGenerator = ({ onClose }) => {
       clearTimeout(timeout);
       controller.abort();
     };
-  }, [searchQuery, selectedSeeds.length]);
+  }, [searchQuery, selectedSeeds.length, accessToken]);
 
   const handleTrackCountChange = (value) => {
     const nextCount = Math.max(5, Math.min(25, Math.floor(Number(value) || 5)));
@@ -183,10 +184,11 @@ const PlaylistGenerator = ({ onClose }) => {
     setSpotifyUrl(null);
 
     try {
-      const response = await fetch(`${NODE_BASE}/api/ai/generate-playlist`, {
+      const response = await fetch(`${API_BASE}/playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'generate',
           seed_track_ids: selectedSeeds.map((track) => track.track_id),
           custom_energy_curve: energyCurve.map((value) => Number(value.toFixed(4))),
           start_energy: energyCurve[0],
@@ -228,10 +230,11 @@ const PlaylistGenerator = ({ onClose }) => {
     setStatus('exporting');
     setErrorMsg('');
     try {
-      const response = await fetch(`${NODE_BASE}/api/ai/export-playlist`, {
+      const response = await fetch(`${API_BASE}/playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'export',
           access_token: accessToken,
           playlist_name: playlistName,
           energy_curve: energyCurve,
@@ -434,6 +437,13 @@ const PlaylistGenerator = ({ onClose }) => {
                       ? `${Math.round(track.actual_energy * 100)}%`
                       : `${Math.round((track.target_energy || 0) * 100)}%`}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => onPlayTrack?.(track.track_id)}
+                    style={s.trackPlayBtn}
+                  >
+                    Play
+                  </button>
                 </div>
               ))}
             </div>
@@ -615,6 +625,11 @@ const s = {
     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   },
   trackEnergy: { fontSize: 11, fontFamily: 'monospace', color: '#1DB954' },
+  trackPlayBtn: {
+    padding: '5px 10px', border: '1px solid #1DB954', borderRadius: 16,
+    backgroundColor: 'transparent', color: '#1DB954', fontSize: 11,
+    fontWeight: 700, cursor: 'pointer',
+  },
   trackActualEnergy: { color: '#6b7280' },
   doneBtn: {
     width: '100%', backgroundColor: 'transparent', color: '#9ca3af',

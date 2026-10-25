@@ -207,11 +207,19 @@ const createPlaylist = async (req, res) => {
   }
 };
 
-router.post('/playlist', createPlaylist);
+router.post('/playlist', async (req, res) => {
+  if (req.body.action === 'generate') {
+    return generatePlaylistPreview(req, res);
+  }
+  if (req.body.action === 'export') {
+    return exportPlaylist(req, res);
+  }
+  return createPlaylist(req, res);
+});
 
 router.post('/playList', createPlaylist);
 
-router.post('/generate-playlist', async (req, res) => {
+const generatePlaylistPreview = async (req, res) => {
   const {
     seed_track_ids: seedTrackIds,
     custom_energy_curve: customEnergyCurve,
@@ -240,9 +248,9 @@ router.post('/generate-playlist', async (req, res) => {
     console.error('[Generate Playlist] Error:', error.message);
     return res.status(502).json({ error: 'Failed to generate playlist', detail: error.message });
   }
-});
+};
 
-router.post('/export-playlist', async (req, res) => {
+const exportPlaylist = async (req, res) => {
   const {
     access_token: accessToken,
     playlist_name: playlistName,
@@ -313,7 +321,10 @@ router.post('/export-playlist', async (req, res) => {
     console.error('[Export Playlist] Error:', error.message);
     return res.status(502).json({ error: 'Failed to export playlist', detail: error.message });
   }
-});
+};
+
+router.post('/generate-playlist', generatePlaylistPreview);
+router.post('/export-playlist', exportPlaylist);
 
 router.post('/queue-preview', async (req, res) => {
   const {
@@ -458,12 +469,114 @@ router.get('/search-seeds', async (req, res) => {
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     if (!query) return res.json({ tracks: [] });
 
-    const searchParams = new URLSearchParams({ q: query, limit: '8' });
-    const results = await mlFetch(`/search_tracks?${searchParams}`);
-    return res.json(results);
+    const accessToken = typeof req.query.access_token === 'string'
+      ? req.query.access_token
+      : '';
+    if (accessToken) {
+      const searchParams = new URLSearchParams({
+        q: query,
+        type: 'track',
+        limit: '20',
+      });
+      try {
+        const spotifyData = await spotifyFetch(`/search?${searchParams}`, accessToken);
+        const items = spotifyData?.tracks?.items ?? [];
+        const spotifyIds = items.map((item) => item.id).filter(Boolean);
+        if (spotifyIds.length > 0) {
+          const { rows } = await db.query(
+            `SELECT id AS track_id, track_name, artists AS artist_name, energy, valence, tempo
+             FROM track_features
+             WHERE id = ANY($1::text[])`,
+            [spotifyIds],
+          );
+          const dbTracks = new Map(rows.map((row) => [row.track_id, row]));
+          const matchingTracks = items
+            .filter((item) => dbTracks.has(item.id))
+            .map((item) => {
+              const dbTrack = dbTracks.get(item.id);
+              return {
+                track_id: item.id,
+                track_name: dbTrack.track_name || item.name,
+                artist_name: dbTrack.artist_name || item.artists?.map((artist) => artist.name).join(', ') || 'Unknown',
+                album_art: item.album?.images?.[0]?.url ?? null,
+                energy: Number(dbTrack.energy),
+                valence: Number(dbTrack.valence),
+                tempo: Number(dbTrack.tempo),
+              };
+            });
+          if (matchingTracks.length > 0) return res.json({ tracks: matchingTracks });
+        }
+      } catch (error) {
+        console.warn('[Search Seeds] Spotify catalog search failed; falling back to database:', error.message);
+      }
+    }
+
+    const { rows } = await db.query(
+      `SELECT id AS track_id, track_name, artists AS artist_name, energy, valence, tempo
+       FROM track_features
+       WHERE track_name ILIKE $1 OR artists ILIKE $1
+       ORDER BY track_name
+       LIMIT 8`,
+      [`%${query}%`],
+    );
+    return res.json({
+      tracks: rows.map((row) => ({
+        ...row,
+        energy: Number(row.energy),
+        valence: Number(row.valence),
+        tempo: Number(row.tempo),
+        album_art: null,
+      })),
+    });
   } catch (error) {
-    console.error('[Search Seeds] Error:', error.message);
-    return res.status(502).json({ error: 'Failed to fetch search seeds', detail: error.message });
+    console.error('[Search Seeds] Database search failed:', error.message);
+    return res.status(502).json({ error: 'Failed to search tracks', detail: error.message });
+  }
+});
+
+router.post('/recently-played', async (req, res) => {
+  const accessToken = req.body?.access_token;
+  if (typeof accessToken !== 'string' || !accessToken) {
+    return res.status(400).json({ error: 'Missing access_token' });
+  }
+
+  try {
+    const data = await spotifyFetch('/me/player/recently-played?limit=1', accessToken);
+    const latest = data?.items?.[0];
+    return res.json({
+      track: latest?.track?.type === 'track' ? latest.track : null,
+      played_at: latest?.played_at ?? null,
+    });
+  } catch (error) {
+    console.error('[Recently Played] Spotify request failed:', error.message);
+    return res.status(502).json({
+      error: 'Failed to fetch the most recently played track',
+      detail: error.message,
+    });
+  }
+});
+
+router.put('/play', async (req, res) => {
+  const { access_token: accessToken, device_id: deviceId, uris } = req.body;
+  if (!accessToken || !deviceId) {
+    return res.status(400).json({ error: 'Missing access_token or device_id' });
+  }
+
+  try {
+    await spotifyFetch('/me/player', accessToken, {
+      method: 'PUT',
+      body: JSON.stringify({ device_ids: [deviceId], play: false }),
+    });
+    if (Array.isArray(uris) && uris.length > 0) {
+      await spotifyFetch(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, accessToken, {
+        method: 'PUT',
+        body: JSON.stringify({ uris }),
+      });
+    }
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[Play] Error:', error.message);
+    return res.status(502).json({ error: error.message });
   }
 });
 

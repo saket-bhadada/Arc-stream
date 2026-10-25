@@ -10,8 +10,23 @@ import db, { databaseReady } from './db.js';
 dotenv.config();
 
 const app = express();
+const frontendUrl = new URL(process.env.FRONTEND_URL || 'http://localhost:5173');
+const allowedOrigins = new Set([frontendUrl.origin]);
+
+if (process.env.NODE_ENV !== 'production') {
+  if (frontendUrl.hostname === 'localhost') {
+    const loopbackUrl = new URL(frontendUrl);
+    loopbackUrl.hostname = '127.0.0.1';
+    allowedOrigins.add(loopbackUrl.origin);
+  } else if (frontendUrl.hostname === '127.0.0.1') {
+    const localhostUrl = new URL(frontendUrl);
+    localhostUrl.hostname = 'localhost';
+    allowedOrigins.add(localhostUrl.origin);
+  }
+}
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: (origin, callback) => callback(null, Boolean(origin && allowedOrigins.has(origin))),
   credentials: true,
 }));
 app.use(express.json());
@@ -34,6 +49,7 @@ app.get('/health', async (_req, res) => {
 
 app.use('/', loginRoutes);
 app.use('/api/ai', dashboardRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 app.use((error, _req, res, _next) => {
   console.error('[Server] Unhandled error:', error.message);

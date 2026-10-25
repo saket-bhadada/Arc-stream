@@ -5,10 +5,12 @@ const SCOPES = [
     'streaming',
     'user-read-email',
     'user-read-private',
-    'user-modify-playback-state',
     'user-read-playback-state',
+    'user-modify-playback-state',
+    'user-read-currently-playing',
+    'user-read-recently-played',
+    'playlist-modify-public',
     'playlist-modify-private',
-    'playlist-modify-public'
 ];
 
 const router = Router();
@@ -25,8 +27,9 @@ const cookieOption = () => ({
 });
 
 router.get('/login',(req,res)=>{
-    const url = spotifyApi.createAuthorizeURL(SCOPES);
-    res.redirect(url);
+    const url = new URL(spotifyApi.createAuthorizeURL(SCOPES));
+    url.searchParams.set('show_dialog', 'true');
+    res.redirect(url.toString());
 });
 
 router.get('/callback',async(req,res)=>{

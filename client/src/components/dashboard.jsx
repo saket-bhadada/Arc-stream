@@ -15,6 +15,23 @@ const MIN_SEQ_LEN = 5;                  // server accepts 5–9
 const AUTO_DJ_THRESHOLD_MS = 25_000;
 const AUTO_DJ_TICK_MS = 1000;
 
+const spotifyErrorMessage = async (res, action) => {
+  const body = await res.json().catch(() => ({}));
+  const reason = body?.error?.reason || body?.reason;
+  const detail = body?.error?.message || reason || body?.message;
+  const premiumHint = res.status === 403
+    ? ' Spotify playback requires Premium, and Spotify Development Mode may require this account to be allowlisted. If access was just granted, log out and sign in again to renew playback scopes.'
+    : '';
+  const error = new Error(`${action} failed (${res.status})${detail ? `: ${detail}` : ''}.${premiumHint}`);
+  error.status = res.status;
+  error.reason = reason;
+  return error;
+};
+
+const isPlaybackForbidden = (error) => (
+  error?.status === 403
+  || error?.reason === 'PREMIUM_REQUIRED'
+);
 
 // ── Cookie-driven refresh helper ────────────────────────────────────────────
 const refreshAccessToken = async () => {
@@ -45,13 +62,156 @@ const transferPlayback = async (deviceId, accessToken, play = false) => {
     body: JSON.stringify({ device_ids: [deviceId], play }),
   });
   if (!res.ok && res.status !== 204) {
-    throw new Error(`Transfer playback failed: ${res.status}`);
+    throw await spotifyErrorMessage(res, 'Transfer playback');
   }
 };
 
 
+// Starts audio on the given device. Transferring with nothing playing leaves
+// the SDK idle, so the UI keeps showing "Nothing Playing".
+const startPlayback = async (deviceId, accessToken, uris) => {
+  const res = await fetch(`${SPOTIFY_BASE}/me/player/play?device_id=${deviceId}`, {
+    method: 'PUT',
+    headers: {
+      Authorization:  `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ uris }),
+  });
+  if (!res.ok && res.status !== 204) {
+    throw await spotifyErrorMessage(res, 'Start playback');
+  }
+};
+
+const fetchPlaybackQueue = async (accessToken) => {
+  const res = await fetch(`${SPOTIFY_BASE}/me/player/queue`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw await spotifyErrorMessage(res, 'Fetch playback queue');
+  return res.json();
+};
+
+const enqueueTrack = async (deviceId, accessToken, uri) => {
+  const res = await fetch(
+    `${SPOTIFY_BASE}/me/player/queue?uri=${encodeURIComponent(uri)}&device_id=${deviceId}`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+  if (!res.ok && res.status !== 204) {
+    throw await spotifyErrorMessage(res, 'Add track to playback queue');
+  }
+};
+
+// Uses whatever is already playing on the user's Spotify (phone/desktop) as the
+// starting track: seeds the store so the UI + LSTM history have it immediately,
+// then transfers playback (keeping position) onto the Arc-Stream device.
+const fetchPlaybackState = async (token) => {
+  // Try full player state first, then the lighter currently-playing endpoint
+  // (different scope: user-read-currently-playing).
+  let lastErr = null;
+  for (const path of ['/me/player', '/me/player/currently-playing']) {
+    const res = await fetch(`${SPOTIFY_BASE}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 204) return { empty: true };
+    if (res.ok) return { state: await res.json() };
+    const body = await res.json().catch(() => ({}));
+    lastErr = { status: res.status, message: body?.error?.message ?? '' };
+  }
+  return { error: lastErr };
+};
+
+const fetchRecentlyPlayedTrack = async (accessToken) => {
+  const res = await fetch(`${NODE_BASE}/api/ai/recently-played`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ access_token: accessToken }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || `Recently played lookup failed (${res.status})`);
+  }
+  return data.track ?? null;
+};
+
+const adoptCurrentPlayback = async (deviceId, onTransferForbidden) => {
+  const st = usePlayerStore.getState();
+  try {
+    let token = st.accessToken;
+    let result = await fetchPlaybackState(st.accessToken);
+
+    // Token may predate the playback scopes — refresh once and retry.
+    if (result.error?.status === 401 || result.error?.status === 403) {
+      try {
+        const data = await refreshAccessToken();
+        const fresh = data?.accessToken ?? data?.access_token;
+        if (fresh) {
+          token = fresh;
+          st.updateAccessToken(fresh, data.expires_in);
+          result = await fetchPlaybackState(fresh);
+        }
+      } catch { /* fall through to warning */ }
+    }
+
+    if (result.empty) {
+      const lastPlayedTrack = await fetchRecentlyPlayedTrack(token);
+      if (!lastPlayedTrack) {
+        console.log('[Arc-Stream] Spotify has no active playback or recently played track.');
+        return;
+      }
+
+      console.log('[Arc-Stream] Selected most recently played Spotify track:', lastPlayedTrack.name);
+      st.setCurrentTrack(lastPlayedTrack);
+      st.setIsPlaying(false);
+      st.setPosition(0);
+      st.setDuration(lastPlayedTrack.duration_ms ?? 0);
+      st.registerPlayedTrack(lastPlayedTrack);
+      return;
+    }
+    if (result.error) {
+      console.warn(
+        `[Arc-Stream] Can't read current Spotify playback (${result.error.status} ${result.error.message}). ` +
+        'Usually: your Spotify account is not added under User Management in the Spotify Developer ' +
+        'Dashboard (Development Mode), or you need to log out and back in to grant playback scopes.'
+      );
+      await transferPlayback(deviceId, token, false);
+      usePlayerStore.getState().setIsActive(true);
+      console.log('[Arc-Stream] Transferred playback to Arc-Stream device.');
+      return;
+    }
+    const state = result.state;
+    const track = state?.item;
+    if (!track || track.type !== 'track') {
+      if (state?.device?.id !== deviceId) {
+        await transferPlayback(deviceId, token, false);
+        console.log('[Arc-Stream] Transferred playback to Arc-Stream device.');
+      }
+      usePlayerStore.getState().setIsActive(true);
+      return;
+    }
+
+    console.log('[Arc-Stream] Adopting current Spotify track:', track.name);
+    st.setCurrentTrack(track);
+    st.setIsPlaying(!!state.is_playing);
+    st.setPosition(state.progress_ms ?? 0);
+    st.setDuration(track.duration_ms ?? 0);
+    st.registerPlayedTrack(track);
+
+    if (state.device?.id !== deviceId) {
+      await transferPlayback(deviceId, token, false);
+      console.log('[Arc-Stream] Transferred current playback to Arc-Stream device.');
+    }
+    usePlayerStore.getState().setIsActive(true);
+  } catch (err) {
+    console.error('[Arc-Stream] Could not initialize playback on Arc-Stream:', err);
+    if (isPlaybackForbidden(err)) onTransferForbidden?.();
+  }
+};
+
 // ── useSpotifyPlayer hook ─────────────────────────────────────────────────────
-const useSpotifyPlayer = () => {
+const useSpotifyPlayer = (onTransferForbidden) => {
   const {
     accessToken,
     setPlayer, setDeviceId, setIsActive,
@@ -74,18 +234,20 @@ const useSpotifyPlayer = () => {
       player.addListener('ready', ({ device_id }) => {
         console.log('[Arc-Stream] Player ready — Device ID:', device_id);
         setDeviceId(device_id);
+        void adoptCurrentPlayback(device_id, onTransferForbidden);
       });
 
       player.addListener('not_ready', ({ device_id }) => {
         console.warn('[Arc-Stream] Device offline:', device_id);
         setIsActive(false);
+        if (usePlayerStore.getState().deviceId === device_id) setDeviceId(null);
       });
 
       player.addListener('initialization_error', ({ message }) =>
-        console.error('[Arc-Stream] Init error:', message)
+        console.error('[Arc-Stream] Web Playback SDK initialization_error:', message)
       );
       player.addListener('authentication_error', ({ message }) =>
-        console.error('[Arc-Stream] Auth error:', message)
+        console.error('[Arc-Stream] Web Playback SDK authentication_error:', message)
       );
       player.addListener('account_error', ({ message }) =>
         console.error('[Arc-Stream] Account error (Premium required):', message)
@@ -110,9 +272,17 @@ const useSpotifyPlayer = () => {
         registerPlayedTrack(current_track);
       });
 
-      player.connect().then((success) => {
-        if (success) console.log('[Arc-Stream] Connected to Spotify Web Playback SDK.');
-      });
+      player.connect()
+        .then((success) => {
+          if (success) {
+            console.log('[Arc-Stream] Connected to Spotify Web Playback SDK.');
+          } else {
+            console.error('[Arc-Stream] Spotify Web Playback SDK connection failed.');
+          }
+        })
+        .catch((err) => {
+          console.error('[Arc-Stream] Spotify Web Playback SDK connection error:', err);
+        });
 
       setPlayer(player);
     };
@@ -130,7 +300,7 @@ const useSpotifyPlayer = () => {
         document.body.appendChild(script);
       }
     }
-  }, [accessToken]);
+  }, [accessToken, onTransferForbidden]);
 };
 
 
@@ -199,12 +369,125 @@ const Switch = ({ checked, onChange, label, hint }) => (
   </div>
 );
 
-const NowPlaying = () => {
-  const { currentTrack, isPlaying, player } = usePlayerStore();
+const NowPlaying = ({ useEmbedFallback, activeEmbedTrackId, onSelectTrack }) => {
+  const { currentTrack, isPlaying, player, deviceId } = usePlayerStore();
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [msg, setMsg] = useState('');
+  const [isQueueing, setIsQueueing] = useState(false);
 
   const albumArt   = currentTrack?.album?.images?.[0]?.url;
   const trackName  = currentTrack?.name  ?? 'Nothing Playing';
   const artistName = currentTrack?.artists?.map((a) => a.name).join(', ') ?? '—';
+
+  const search = async (e) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+    setMsg('Searching…');
+    try {
+      const res = await fetch(
+        `${NODE_BASE}/api/dashboard/search-seeds?q=${encodeURIComponent(query.trim())}&access_token=${encodeURIComponent(usePlayerStore.getState().accessToken || '')}`,
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body.error || body.detail || `Database search failed (${res.status})`);
+      }
+      setResults(body.tracks ?? []);
+      setMsg(body.tracks?.length ? '' : 'No matching tracks in the project database.');
+    } catch (err) {
+      console.error('[Arc-Stream] Database track search failed:', err);
+      setMsg(err.message);
+    }
+  };
+
+  const playTrack = async (track) => {
+    if (isQueueing) return;
+    setIsQueueing(true);
+    try {
+      if (useEmbedFallback) {
+        onSelectTrack(track.track_id);
+        setMsg(`Playing “${track.track_name}” with the Spotify Embed player.`);
+        setResults([]);
+        setQuery('');
+        return;
+      }
+      const st = usePlayerStore.getState();
+      if (!st.deviceId || !st.accessToken) {
+        throw new Error('The Arc-Stream Spotify device is not ready. Please try again.');
+      }
+      const trackUri = `spotify:track:${track.track_id}`;
+      await st.player?.activateElement?.();
+      let playbackQueue;
+      try {
+        console.info('[Arc-Stream] API request: GET https://api.spotify.com/v1/me/player/queue');
+        playbackQueue = await fetchPlaybackQueue(st.accessToken);
+      } catch (err) {
+        console.warn('[Arc-Stream] Could not inspect Spotify queue; using current player state:', err);
+        if (!st.currentTrack) {
+          console.info(
+            '[Arc-Stream] API request: PUT https://api.spotify.com/v1/me/player/play?device_id=%s',
+            st.deviceId,
+          );
+          await startPlayback(st.deviceId, st.accessToken, [trackUri]);
+          setMsg(`Started “${track.track_name}”. Spotify queue status could not be read.`);
+          setResults([]);
+          setQuery('');
+          return;
+        }
+        playbackQueue = { queue: [st.currentTrack] };
+      }
+      const queueWasEmpty = !playbackQueue.queue?.length;
+      if (queueWasEmpty) {
+        console.info(
+          '[Arc-Stream] API request: PUT https://api.spotify.com/v1/me/player/play?device_id=%s',
+          st.deviceId,
+        );
+        await startPlayback(st.deviceId, st.accessToken, [trackUri]);
+      } else {
+        console.info(
+          '[Arc-Stream] API request: POST https://api.spotify.com/v1/me/player/queue?uri=%s&device_id=%s',
+          encodeURIComponent(trackUri),
+          st.deviceId,
+        );
+        await enqueueTrack(st.deviceId, st.accessToken, trackUri);
+      }
+      setMsg(queueWasEmpty
+        ? `Started “${track.track_name}”.`
+        : `Added “${track.track_name}” to the Spotify queue.`);
+      setResults([]);
+      setQuery('');
+    } catch (err) {
+      console.error('[Arc-Stream] Could not queue selected track:', err);
+      setMsg(err.message);
+      if (isPlaybackForbidden(err)) onSelectTrack(track.track_id);
+    } finally {
+      setIsQueueing(false);
+    }
+  };
+
+  const handleTogglePlayback = async () => {
+    try {
+      await player?.activateElement?.();
+      if (!isPlaying && currentTrack?.id && deviceId) {
+        const token = usePlayerStore.getState().accessToken;
+        console.info(
+          '[Arc-Stream] API request: PUT https://api.spotify.com/v1/me/player/play?device_id=%s',
+          deviceId,
+        );
+        await startPlayback(deviceId, token, [`spotify:track:${currentTrack.id}`]);
+        return;
+      }
+      console.info(
+        '[Arc-Stream] Playback button: Spotify Web Playback SDK Player#togglePlay() (SDK command; no direct REST endpoint).',
+      );
+      await player?.togglePlay();
+    } catch (err) {
+      console.error('[Arc-Stream] Playback toggle failed:', err);
+      setMsg(err.message);
+    }
+  };
+
+  const embeddedTrackId = activeEmbedTrackId || currentTrack?.id;
 
   return (
     <div style={s.card}>
@@ -218,11 +501,51 @@ const NowPlaying = () => {
       </div>
       <div style={s.controls}>
         <button style={s.btn}     onClick={() => player?.previousTrack()}>⏮</button>
-        <button style={s.playBtn} onClick={() => player?.togglePlay()}>
+        <button style={s.playBtn} onClick={handleTogglePlayback}>
           {isPlaying ? '⏸' : '▶'}
         </button>
         <button style={s.btn}     onClick={() => player?.nextTrack()}>⏭</button>
       </div>
+
+      {useEmbedFallback && embeddedTrackId && (
+        <iframe
+          title={`Spotify player for ${trackName}`}
+          src={`https://open.spotify.com/embed/track/${encodeURIComponent(embeddedTrackId)}?utm_source=generator&theme=0`}
+          width="100%"
+          height="152"
+          style={{ border: 0, borderRadius: 12, marginTop: 12 }}
+          allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+          loading="lazy"
+        />
+      )}
+
+      {msg && <p style={{ width: '100%', fontSize: 12, color: '#B3B3B3', margin: '6px 0 0' }}>{msg}</p>}
+      {deviceId && (
+        <form onSubmit={search} style={{ width: '100%', marginTop: 12 }}>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search a song to add to the queue…"
+            style={{
+              width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 20,
+              border: '1px solid #282828', background: '#181818', color: '#fff',
+            }}
+          />
+          {results.map((t) => (
+            <button
+              key={t.track_id} type="button" onClick={() => playTrack(t)}
+              disabled={isQueueing}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left', marginTop: 6, padding: '6px 10px',
+                background: '#181818', border: '1px solid #282828', borderRadius: 8,
+                color: '#fff', cursor: isQueueing ? 'wait' : 'pointer', fontSize: 13,
+              }}
+            >
+              {t.track_name} <span style={{ color: '#B3B3B3' }}>· {t.artist_name}</span>
+            </button>
+          ))}
+        </form>
+      )}
     </div>
   );
 };
@@ -299,10 +622,8 @@ const PlannerDrawer = ({ onClose, generatedTracks, onOpenGenerator }) => {
 // DASHBOARD PAGE
 // ════════════════════════════════════════════════════════════════════════════
 const DashboardPage = () => {
-  useSpotifyPlayer();
-
   const {
-    deviceId, isActive, accessToken, expiresAt,
+    deviceId, isActive, accessToken, expiresAt, setIsActive,
     updateAccessToken, clearTokens,
     targetEnergy, setTargetEnergy,
     currentTrack, currentVector, predictedVector,
@@ -314,7 +635,11 @@ const DashboardPage = () => {
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
   const [generatedTracks, setGeneratedTracks] = useState([]);
+  const [useEmbedFallback, setUseEmbedFallback] = useState(false);
+  const [activeEmbedTrackId, setActiveEmbedTrackId] = useState(null);
   const queueInFlightRef = useRef(false);
+
+  useSpotifyPlayer(setUseEmbedFallback);
 
   // Silent token refresh
   useEffect(() => {
@@ -401,10 +726,48 @@ const DashboardPage = () => {
 
   const handleActivate = async () => {
     try {
+      // Must run inside a user gesture or the browser blocks audio.
+      await usePlayerStore.getState().player?.activateElement?.();
       await transferPlayback(deviceId, accessToken, false);
+      setIsActive(true);
+      setQueueStatus({
+        kind: 'ok',
+        msg: 'Device activated. Search for a track or generate a playlist to start playback.',
+      });
     } catch (err) {
       console.error('[Arc-Stream] Playback transfer failed:', err);
+      if (isPlaybackForbidden(err)) {
+        setUseEmbedFallback(true);
+        setActiveEmbedTrackId(currentTrack?.id ?? null);
+      }
+      setQueueStatus({ kind: 'error', msg: err.message });
     }
+  };
+
+  // Plays a generated playlist on this device.
+  const playGenerated = async (tracks) => {
+    const uris = (tracks ?? []).map((t) => t.track_id).filter(Boolean).map((id) => `spotify:track:${id}`);
+    if (!uris.length || !deviceId) return;
+    try {
+      await usePlayerStore.getState().player?.activateElement?.();
+      await startPlayback(deviceId, usePlayerStore.getState().accessToken, uris);
+    } catch (err) {
+      console.error('[Arc-Stream] Start playback failed:', err);
+      if (isPlaybackForbidden(err)) {
+        setUseEmbedFallback(true);
+        setActiveEmbedTrackId(tracks?.[0]?.track_id ?? null);
+      }
+      setQueueStatus({ kind: 'error', msg: err.message });
+    }
+  };
+
+  const playGeneratedTrack = (trackId) => {
+    console.info(
+      '[Arc-Stream] Generated-track Play button: loading Spotify Embed https://open.spotify.com/embed/track/%s',
+      trackId,
+    );
+    setActiveEmbedTrackId(trackId);
+    setUseEmbedFallback(true);
   };
 
   const handleLogout = async () => {
@@ -448,7 +811,11 @@ const DashboardPage = () => {
 
         {/* 2 ─ Left/main pane: artwork, controller, target energy, Auto-DJ */}
         <div style={s.col}>
-          <NowPlaying />
+          <NowPlaying
+            useEmbedFallback={useEmbedFallback}
+            activeEmbedTrackId={activeEmbedTrackId}
+            onSelectTrack={playGeneratedTrack}
+          />
 
           <div style={s.panel}>
             <div style={s.energyWrap}>
@@ -477,8 +844,8 @@ const DashboardPage = () => {
             />
 
             <button
-              style={{ ...s.queueBtn, opacity: !isActive || loading ? 0.5 : 1 }}
-              onClick={handleQueueNextTrack} disabled={!isActive || loading}
+              style={{ ...s.queueBtn, opacity: (!isActive && !currentTrack) || loading ? 0.5 : 1 }}
+              onClick={handleQueueNextTrack} disabled={(!isActive && !currentTrack) || loading}
             >
               {loading ? 'Predicting…' : 'Queue next track now'}
             </button>
@@ -516,7 +883,8 @@ const DashboardPage = () => {
         <PlaylistGenerator
           accessToken={accessToken}
           onClose={() => setGeneratorOpen(false)}
-          onGenerated={(tracks) => setGeneratedTracks(tracks ?? [])}
+          onPlayTrack={playGeneratedTrack}
+          onGenerated={(tracks) => { setGeneratedTracks(tracks ?? []); playGenerated(tracks); }}
         />
       )}
     </div>
