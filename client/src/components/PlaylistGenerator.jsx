@@ -96,6 +96,10 @@ const CurvePreview = ({ energyCurve }) => {
 
 const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
   const accessToken = usePlayerStore((state) => state.accessToken);
+  const sessionHistory = usePlayerStore((state) => state.sessionHistory);
+  const trackMeta = usePlayerStore((state) => state.trackMeta);
+  const currentZSequence = usePlayerStore((state) => state.currentZSequence);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [selectedSeeds, setSelectedSeeds] = useState([]);
@@ -104,6 +108,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
   const [playlistName, setPlaylistName] = useState('My Custom Energy Arc');
   const [generatedTracks, setGeneratedTracks] = useState([]);
   const [spotifyUrl, setSpotifyUrl] = useState(null);
+  const [exportNotice, setExportNotice] = useState('');
   const [status, setStatus] = useState('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const [searchError, setSearchError] = useState('');
@@ -116,7 +121,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     const timeout = setTimeout(async () => {
       try {
         const response = await fetch(
-          `${API_BASE}/search-seeds?q=${encodeURIComponent(query)}&access_token=${encodeURIComponent(accessToken || '')}`,
+          `${NODE_BASE}/api/dashboard/search-seeds?q=${encodeURIComponent(query)}`,
           { signal: controller.signal },
         );
         const data = await response.json().catch(() => ({}));
@@ -135,7 +140,44 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
       clearTimeout(timeout);
       controller.abort();
     };
-  }, [searchQuery, selectedSeeds.length, accessToken]);
+  }, [searchQuery, selectedSeeds.length]);
+
+  const handleQuickFillSeeds = async () => {
+    setSearchError('');
+    setErrorMsg('');
+    try {
+      const recentSeeds = (sessionHistory || [])
+        .slice(-5)
+        .filter((id) => trackMeta?.[id]?.name)
+        .map((id) => ({
+          track_id: id,
+          track_name: trackMeta[id].name,
+          artist_name: trackMeta[id].artists || '',
+        }));
+
+      const response = await fetch(`${NODE_BASE}/api/dashboard/search-seeds?q=random`);
+      const data = await response.json().catch(() => ({}));
+      const sampleTracks = Array.isArray(data.tracks) ? data.tracks : [];
+
+      const merged = [...recentSeeds];
+      for (const track of sampleTracks) {
+        if (merged.length >= 5) break;
+        if (track?.track_id && !merged.some((s) => s.track_id === track.track_id)) {
+          merged.push(track);
+        }
+      }
+
+      if (merged.length > 0) {
+        setSelectedSeeds(merged.slice(0, 5));
+        setSearchQuery('');
+        setSearchResults([]);
+      } else {
+        setSearchError('Could not load sample seed songs.');
+      }
+    } catch (err) {
+      setSearchError(err.message || 'Could not load sample seed songs.');
+    }
+  };
 
   const handleTrackCountChange = (value) => {
     const nextCount = Math.max(5, Math.min(25, Math.floor(Number(value) || 5)));
@@ -147,6 +189,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setTrackCount(nextCount);
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setExportNotice('');
   };
 
   const handleSearchChange = (value) => {
@@ -162,6 +205,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setEnergyCurve(nextCurve);
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setExportNotice('');
   };
 
   const updateCurveNode = (index, value) => {
@@ -170,38 +214,37 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     ));
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setExportNotice('');
   };
 
   const handleGenerate = async () => {
-    if (selectedSeeds.length !== 5) {
-      setErrorMsg('Select exactly 5 seed tracks to generate a playlist.');
-      setStatus('error');
-      return;
-    }
-
     setStatus('generating');
     setErrorMsg('');
     setSpotifyUrl(null);
+    setExportNotice('');
 
     try {
-      const response = await fetch(`${API_BASE}/playlist`, {
+      const normalizedCurve = energyCurve.map((value) => Number(Number(value).toFixed(4)));
+      const response = await fetch(`${NODE_BASE}/api/dashboard/playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'generate',
-          seed_track_ids: selectedSeeds.map((track) => track.track_id),
-          custom_energy_curve: energyCurve.map((value) => Number(value.toFixed(4))),
-          start_energy: energyCurve[0],
-          target_energy: Math.max(...energyCurve),
-          track_count: trackCount,
-          curve_type: 'arc',
+          access_token: accessToken,
+          seed_track_ids: selectedSeeds.map((s) => s.track_id),
+          custom_energy_curve: normalizedCurve,
+          energy_curve: normalizedCurve,
+          current_z_sequence: currentZSequence,
+          session_history: sessionHistory,
+          track_count: energyCurve.length,
+          playlist_name: playlistName,
+          export_to_spotify: false,
         }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(data.detail?.message || data.detail || data.error || 'Playlist generation failed.');
       }
-      const tracks = Array.isArray(data.playlist) ? data.playlist : data.tracks;
+      const tracks = Array.isArray(data.tracks) ? data.tracks : data.playlist;
       if (!Array.isArray(tracks) || tracks.length === 0) {
         throw new Error('The generator did not return any tracks.');
       }
@@ -216,29 +259,26 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
   };
 
   const handleExport = async () => {
-    if (!accessToken) {
-      setErrorMsg('Connect to Spotify before exporting your playlist.');
-      setStatus('error');
-      return;
-    }
-    if (generatedTracks.length === 0) {
-      setErrorMsg('Generate a playlist before exporting it.');
-      setStatus('error');
-      return;
-    }
-
     setStatus('exporting');
     setErrorMsg('');
+    setSpotifyUrl(null);
+    setExportNotice('');
+
     try {
-      const response = await fetch(`${API_BASE}/playlist`, {
+      const normalizedCurve = energyCurve.map((value) => Number(Number(value).toFixed(4)));
+      const response = await fetch(`${NODE_BASE}/api/dashboard/playlist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'export',
           access_token: accessToken,
+          seed_track_ids: selectedSeeds.map((s) => s.track_id),
+          custom_energy_curve: normalizedCurve,
+          energy_curve: normalizedCurve,
+          current_z_sequence: currentZSequence,
+          session_history: sessionHistory,
+          track_count: energyCurve.length,
           playlist_name: playlistName,
-          energy_curve: energyCurve,
-          tracks: generatedTracks,
+          export_to_spotify: true,
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -246,7 +286,19 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
         throw new Error(data.detail?.message || data.detail || data.error || 'Playlist export failed.');
       }
 
-      setSpotifyUrl(data.playlist_url || null);
+      const tracks = Array.isArray(data.tracks) ? data.tracks : data.playlist;
+      if (Array.isArray(tracks) && tracks.length > 0) {
+        setGeneratedTracks(tracks);
+      }
+
+      const resolvedUrl = data.playlist_url || data.spotify_url || null;
+      setSpotifyUrl(resolvedUrl);
+
+      if (data.exported === false && !resolvedUrl) {
+        setExportNotice(
+          'Spotify Development Mode restricted direct playlist creation — your generated playlist is ready below to play or open track-by-track in Spotify.',
+        );
+      }
       setStatus('ready');
     } catch (error) {
       console.error('[PlaylistGenerator] Export failed:', error);
@@ -265,12 +317,14 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setSearchResults([]);
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setExportNotice('');
   };
 
   const removeSeed = (trackId) => {
     setSelectedSeeds((seeds) => seeds.filter((seed) => seed.track_id !== trackId));
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setExportNotice('');
   };
 
   return (
@@ -282,12 +336,32 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
         </div>
 
         <div style={s.block}>
-          <span style={s.blockLabel}>1. Choose five seed tracks ({selectedSeeds.length}/5)</span>
+          <div style={{ ...s.curveHeader, marginBottom: 8 }}>
+            <span style={{ ...s.blockLabel, marginBottom: 0 }}>
+              Selected Seed Songs ({selectedSeeds.length}/5)
+            </span>
+            <button
+              type="button"
+              onClick={handleQuickFillSeeds}
+              style={{
+                padding: '4px 10px',
+                borderRadius: 14,
+                border: '1px solid #1DB954',
+                backgroundColor: 'rgba(29, 185, 84, 0.12)',
+                color: '#1DB954',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Use Current / Sample 5 Songs
+            </button>
+          </div>
           <input
             type="search"
             value={searchQuery}
             onChange={(event) => handleSearchChange(event.target.value)}
-            placeholder={selectedSeeds.length === 5 ? 'Five seeds selected' : 'Search track or artist'}
+            placeholder={selectedSeeds.length === 5 ? 'Five seeds selected' : 'Search song to add as seed...'}
             disabled={selectedSeeds.length === 5}
             style={{ ...s.customCountInput, width: '100%', boxSizing: 'border-box', textAlign: 'left' }}
           />
@@ -397,9 +471,12 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
           <p style={s.spotifyNotice}>
             Exported to Spotify.{' '}
             <a href={spotifyUrl} target="_blank" rel="noreferrer" style={s.spotifyInlineLink}>
-              Open playlist
+              Open Playlist in Spotify →
             </a>
           </p>
+        )}
+        {exportNotice && !spotifyUrl && (
+          <p style={s.spotifyNotice}>{exportNotice}</p>
         )}
 
         <div style={s.actionRow}>
@@ -407,15 +484,15 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
             type="button"
             style={{ ...s.secondaryBtn, ...(status === 'generating' || status === 'exporting' ? s.disabledBtn : {}) }}
             onClick={handleGenerate}
-            disabled={status === 'generating' || status === 'exporting' || selectedSeeds.length !== 5}
+            disabled={status === 'generating' || status === 'exporting'}
           >
-            {status === 'generating' ? 'Generating…' : 'Preview playlist'}
+            {status === 'generating' ? 'Generating…' : 'Preview Playlist'}
           </button>
           <button
             type="button"
             style={{ ...s.generateBtn, ...(status === 'generating' || status === 'exporting' ? s.generateBtnLoading : {}) }}
             onClick={handleExport}
-            disabled={status === 'generating' || status === 'exporting' || generatedTracks.length === 0 || !accessToken}
+            disabled={status === 'generating' || status === 'exporting'}
           >
             {status === 'exporting' ? 'Exporting…' : 'Export to Spotify'}
           </button>
@@ -425,27 +502,41 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
           <div style={s.block}>
             <span style={s.blockLabel}>Generated playlist ({generatedTracks.length} tracks)</span>
             <div style={s.trackPreviewList}>
-              {generatedTracks.map((track, index) => (
-                <div key={track.track_id} style={s.trackRow}>
-                  <span style={s.trackPos}>{index + 1}</span>
-                  <span style={s.trackName}>
-                    {track.track_name || track.track_id}
-                    {track.artist_name && <small style={s.searchArtist}> — {track.artist_name}</small>}
-                  </span>
-                  <span style={s.trackEnergy}>
-                    {typeof track.actual_energy === 'number'
-                      ? `${Math.round(track.actual_energy * 100)}%`
-                      : `${Math.round((track.target_energy || 0) * 100)}%`}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onPlayTrack?.(track.track_id)}
-                    style={s.trackPlayBtn}
-                  >
-                    Play
-                  </button>
-                </div>
-              ))}
+              {generatedTracks.map((track, index) => {
+                const targetPct = Math.round(((track.target_energy ?? energyCurve[index] ?? 0.5) * 100));
+                const actualPct = typeof track.actual_energy === 'number'
+                  ? Math.round(track.actual_energy * 100)
+                  : targetPct;
+                return (
+                  <div key={`${track.track_id}-${index}`} style={s.trackRow}>
+                    <span style={s.trackPos}>#{index + 1}</span>
+                    <span style={s.trackName}>
+                      {track.track_name || track.track_id}
+                      {track.artist_name && <small style={s.searchArtist}> — {track.artist_name}</small>}
+                    </span>
+                    <span style={s.trackEnergy} title="Graph Target Energy → Actual Track Energy">
+                      {targetPct}% → {actualPct}%
+                    </span>
+                    {onPlayTrack ? (
+                      <button
+                        type="button"
+                        onClick={() => onPlayTrack(track.track_id)}
+                        style={s.trackPlayBtn}
+                      >
+                        ▶ Play
+                      </button>
+                    ) : null}
+                    <a
+                      href={`https://open.spotify.com/track/${track.track_id}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ ...s.trackPlayBtn, textDecoration: 'none' }}
+                    >
+                      Open in Spotify
+                    </a>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

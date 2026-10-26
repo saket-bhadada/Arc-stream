@@ -36,3 +36,24 @@ export const requestBuffer = async (payload) => {
   if (!res.ok) throw new Error(data.error ?? `buffer failed (${res.status})`);
   return data; // { success, tracks: [{ track_id, track_name, artists, predicted_vector }] }
 };
+
+export const searchSeedTracks = async (query = 'random', signal) => {
+  const res = await fetch(
+    `${NODE_BASE}/api/dashboard/search-seeds?q=${encodeURIComponent(query || 'random')}`,
+    signal ? { signal } : undefined,
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `search-seeds failed (${res.status})`);
+  return Array.isArray(data.tracks) ? data.tracks : [];
+};
+
+export const requestPlaylist = async (payload) => {
+  const res = await fetch(`${NODE_BASE}/api/dashboard/playlist`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail?.message || data.detail || data.error || `playlist failed (${res.status})`);
+  return data;
+};
