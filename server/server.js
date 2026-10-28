@@ -3,30 +3,28 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
 
+dotenv.config();
+
 import dashboardRoutes from './components/DashboardRoutes.js';
 import loginRoutes from './components/loginRoutes.js';
 import db, { databaseReady } from './db.js';
-
-dotenv.config();
 
 const app = express();
 const frontendUrl = new URL(process.env.FRONTEND_URL || 'http://localhost:5173');
 const allowedOrigins = new Set([frontendUrl.origin]);
 
-if (process.env.NODE_ENV !== 'production') {
-  if (frontendUrl.hostname === 'localhost') {
-    const loopbackUrl = new URL(frontendUrl);
-    loopbackUrl.hostname = '127.0.0.1';
-    allowedOrigins.add(loopbackUrl.origin);
-  } else if (frontendUrl.hostname === '127.0.0.1') {
-    const localhostUrl = new URL(frontendUrl);
-    localhostUrl.hostname = 'localhost';
-    allowedOrigins.add(localhostUrl.origin);
-  }
+if (frontendUrl.hostname === 'localhost') {
+  const loopbackUrl = new URL(frontendUrl);
+  loopbackUrl.hostname = '127.0.0.1';
+  allowedOrigins.add(loopbackUrl.origin);
+} else if (frontendUrl.hostname === '127.0.0.1') {
+  const localhostUrl = new URL(frontendUrl);
+  localhostUrl.hostname = 'localhost';
+  allowedOrigins.add(localhostUrl.origin);
 }
 
 app.use(cors({
-  origin: (origin, callback) => callback(null, Boolean(origin && allowedOrigins.has(origin))),
+  origin: (origin, callback) => callback(null, Boolean(!origin || allowedOrigins.has(origin))),
   credentials: true,
 }));
 app.use(express.json());

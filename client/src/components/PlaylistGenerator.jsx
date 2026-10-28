@@ -3,12 +3,11 @@ import { useEffect, useState } from 'react';
 import { usePlayerStore } from '../store/playerStore';
 
 const NODE_BASE = import.meta.env.VITE_NODE_BASE ?? 'http://127.0.0.1:3000';
-const API_BASE = `${NODE_BASE}/api/dashboard`;
 
 const previewCurve = (startEnergy, targetEnergy, curveType, points = 24) => {
   const out = [];
   for (let i = 0; i < points; i++) {
-    const t = i / (points - 1);
+    const t = points === 1 ? 0 : i / (points - 1);
     let v;
     if (curveType === 'linear') {
       v = startEnergy + (targetEnergy - startEnergy) * t;
@@ -69,7 +68,7 @@ const CurvePreview = ({ energyCurve }) => {
   const height = 100;
   const path = energyCurve
     .map((v, i) => {
-      const x = (i / (energyCurve.length - 1)) * width;
+      const x = energyCurve.length <= 1 ? 0 : (i / (energyCurve.length - 1)) * width;
       const y = height - v * height;
       return `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
@@ -94,21 +93,41 @@ const CurvePreview = ({ energyCurve }) => {
   );
 };
 
-const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
+const PlaylistGenerator = ({
+  onClose,
+  onPlayTrack,
+  onPlayPlaylist,
+  onGenerated,
+  initialPreset,
+}) => {
   const accessToken = usePlayerStore((state) => state.accessToken);
+  const updateAccessToken = usePlayerStore((state) => state.updateAccessToken);
   const sessionHistory = usePlayerStore((state) => state.sessionHistory);
   const trackMeta = usePlayerStore((state) => state.trackMeta);
   const currentZSequence = usePlayerStore((state) => state.currentZSequence);
 
+  const initialCount = initialPreset?.trackCount
+    ? Math.max(5, Math.min(25, Math.round(initialPreset.trackCount)))
+    : 10;
+
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [selectedSeeds, setSelectedSeeds] = useState([]);
-  const [trackCount, setTrackCount] = useState(10);
-  const [energyCurve, setEnergyCurve] = useState(() => previewCurve(0.3, 0.8, 'linear', 10));
+  const [trackCount, setTrackCount] = useState(initialCount);
+  const [energyCurve, setEnergyCurve] = useState(() =>
+    previewCurve(
+      initialPreset?.startEnergy ?? 0.3,
+      initialPreset?.targetEnergy ?? 0.8,
+      initialPreset?.curveType ?? 'linear',
+      initialCount,
+    )
+  );
   const [playlistName, setPlaylistName] = useState('My Custom Energy Arc');
   const [generatedTracks, setGeneratedTracks] = useState([]);
   const [spotifyUrl, setSpotifyUrl] = useState(null);
+  const [spotifyPlaylistId, setSpotifyPlaylistId] = useState(null);
   const [exportNotice, setExportNotice] = useState('');
+  const [copiedNotice, setCopiedNotice] = useState('');
   const [status, setStatus] = useState('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const [searchError, setSearchError] = useState('');
@@ -122,7 +141,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
       try {
         const response = await fetch(
           `${NODE_BASE}/api/dashboard/search-seeds?q=${encodeURIComponent(query)}`,
-          { signal: controller.signal },
+          { signal: controller.signal, credentials: 'include' },
         );
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || `Search failed (${response.status})`);
@@ -142,6 +161,31 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     };
   }, [searchQuery, selectedSeeds.length]);
 
+  const ensureValidAccessToken = async () => {
+    const current = usePlayerStore.getState().accessToken;
+    const expiresAt = usePlayerStore.getState().expiresAt;
+    if (current && (!expiresAt || expiresAt - Date.now() > 30_000)) {
+      return current;
+    }
+    try {
+      const res = await fetch(`${NODE_BASE}/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const fresh = data.access_token || data.accessToken;
+        if (fresh) {
+          updateAccessToken(fresh, data.expires_in || 3600);
+          return fresh;
+        }
+      }
+    } catch {
+      // Fall back to existing token or cookie-based server refresh
+    }
+    return current;
+  };
+
   const handleQuickFillSeeds = async () => {
     setSearchError('');
     setErrorMsg('');
@@ -155,7 +199,9 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
           artist_name: trackMeta[id].artists || '',
         }));
 
-      const response = await fetch(`${NODE_BASE}/api/dashboard/search-seeds?q=random`);
+      const response = await fetch(`${NODE_BASE}/api/dashboard/search-seeds?q=random`, {
+        credentials: 'include',
+      });
       const data = await response.json().catch(() => ({}));
       const sampleTracks = Array.isArray(data.tracks) ? data.tracks : [];
 
@@ -189,6 +235,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setTrackCount(nextCount);
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setSpotifyPlaylistId(null);
     setExportNotice('');
   };
 
@@ -205,6 +252,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setEnergyCurve(nextCurve);
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setSpotifyPlaylistId(null);
     setExportNotice('');
   };
 
@@ -214,6 +262,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     ));
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setSpotifyPlaylistId(null);
     setExportNotice('');
   };
 
@@ -221,15 +270,19 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setStatus('generating');
     setErrorMsg('');
     setSpotifyUrl(null);
+    setSpotifyPlaylistId(null);
     setExportNotice('');
+    setCopiedNotice('');
 
     try {
+      const token = await ensureValidAccessToken();
       const normalizedCurve = energyCurve.map((value) => Number(Number(value).toFixed(4)));
       const response = await fetch(`${NODE_BASE}/api/dashboard/playlist`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          access_token: accessToken,
+          access_token: token,
           seed_track_ids: selectedSeeds.map((s) => s.track_id),
           custom_energy_curve: normalizedCurve,
           energy_curve: normalizedCurve,
@@ -244,12 +297,16 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
       if (!response.ok) {
         throw new Error(data.detail?.message || data.detail || data.error || 'Playlist generation failed.');
       }
+      if (data.access_token) {
+        updateAccessToken(data.access_token, 3600);
+      }
       const tracks = Array.isArray(data.tracks) ? data.tracks : data.playlist;
       if (!Array.isArray(tracks) || tracks.length === 0) {
         throw new Error('The generator did not return any tracks.');
       }
 
       setGeneratedTracks(tracks);
+      onGenerated?.(tracks);
       setStatus('ready');
     } catch (error) {
       console.error('[PlaylistGenerator] Generation failed:', error);
@@ -262,15 +319,19 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setStatus('exporting');
     setErrorMsg('');
     setSpotifyUrl(null);
+    setSpotifyPlaylistId(null);
     setExportNotice('');
+    setCopiedNotice('');
 
     try {
+      const token = await ensureValidAccessToken();
       const normalizedCurve = energyCurve.map((value) => Number(Number(value).toFixed(4)));
       const response = await fetch(`${NODE_BASE}/api/dashboard/playlist`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          access_token: accessToken,
+          access_token: token,
           seed_track_ids: selectedSeeds.map((s) => s.track_id),
           custom_energy_curve: normalizedCurve,
           energy_curve: normalizedCurve,
@@ -278,6 +339,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
           session_history: sessionHistory,
           track_count: energyCurve.length,
           playlist_name: playlistName,
+          tracks: generatedTracks.length > 0 ? generatedTracks : undefined,
           export_to_spotify: true,
         }),
       });
@@ -285,18 +347,26 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
       if (!response.ok) {
         throw new Error(data.detail?.message || data.detail || data.error || 'Playlist export failed.');
       }
+      if (data.access_token) {
+        updateAccessToken(data.access_token, 3600);
+      }
 
       const tracks = Array.isArray(data.tracks) ? data.tracks : data.playlist;
       if (Array.isArray(tracks) && tracks.length > 0) {
         setGeneratedTracks(tracks);
+        onGenerated?.(tracks);
       }
 
-      const resolvedUrl = data.playlist_url || data.spotify_url || null;
+      const resolvedUrl =
+        data.playlist_url
+        || data.spotify_url
+        || (data.playlist_id ? `https://open.spotify.com/playlist/${data.playlist_id}` : null);
       setSpotifyUrl(resolvedUrl);
+      setSpotifyPlaylistId(data.playlist_id || null);
 
       if (data.exported === false && !resolvedUrl) {
         setExportNotice(
-          'Spotify Development Mode restricted direct playlist creation — your generated playlist is ready below to play or open track-by-track in Spotify.',
+          `Spotify API could not create the playlist directly (${data.export_error || 'check Spotify Developer allowlist / playlist scopes'}). You can copy the Spotify track links below and paste (Ctrl+V) directly into any Spotify playlist, or play all tracks now.`,
         );
       }
       setStatus('ready');
@@ -304,6 +374,19 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
       console.error('[PlaylistGenerator] Export failed:', error);
       setErrorMsg(error.message || 'Could not export the playlist.');
       setStatus('error');
+    }
+  };
+
+  const handleCopySpotifyUris = async () => {
+    if (!generatedTracks.length) return;
+    const links = generatedTracks
+      .map((t) => `https://open.spotify.com/track/${t.track_id}`)
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(links);
+      setCopiedNotice('Copied Spotify track links! Press Ctrl+V inside any Spotify playlist to add all tracks.');
+    } catch {
+      setCopiedNotice('Could not access clipboard automatically.');
     }
   };
 
@@ -317,6 +400,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setSearchResults([]);
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setSpotifyPlaylistId(null);
     setExportNotice('');
   };
 
@@ -324,6 +408,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
     setSelectedSeeds((seeds) => seeds.filter((seed) => seed.track_id !== trackId));
     setGeneratedTracks([]);
     setSpotifyUrl(null);
+    setSpotifyPlaylistId(null);
     setExportNotice('');
   };
 
@@ -338,7 +423,7 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
         <div style={s.block}>
           <div style={{ ...s.curveHeader, marginBottom: 8 }}>
             <span style={{ ...s.blockLabel, marginBottom: 0 }}>
-              Selected Seed Songs ({selectedSeeds.length}/5)
+              1. Selected Seed Songs ({selectedSeeds.length}/5)
             </span>
             <button
               type="button"
@@ -465,18 +550,41 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
         </div>
 
         {status === 'error' && <p style={s.errorText}>{errorMsg}</p>}
-        {status === 'generating' && <p style={s.statusText}>Generating playlist…</p>}
-        {status === 'exporting' && <p style={s.statusText}>Exporting to Spotify…</p>}
+        {status === 'generating' && <p style={s.statusText}>Generating playlist with LSTM model…</p>}
+        {status === 'exporting' && <p style={s.statusText}>Exporting model playlist to Spotify…</p>}
         {spotifyUrl && (
-          <p style={s.spotifyNotice}>
-            Exported to Spotify.{' '}
-            <a href={spotifyUrl} target="_blank" rel="noreferrer" style={s.spotifyInlineLink}>
-              Open Playlist in Spotify →
-            </a>
-          </p>
+          <div style={s.spotifyNotice}>
+            <div>
+              ✓ Playlist exported to your Spotify account!{' '}
+              <a href={spotifyUrl} target="_blank" rel="noreferrer" style={s.spotifyInlineLink}>
+                Open Playlist in Spotify →
+              </a>
+            </div>
+            {spotifyPlaylistId && (
+              <iframe
+                title="Exported Spotify Playlist"
+                src={`https://open.spotify.com/embed/playlist/${encodeURIComponent(spotifyPlaylistId)}?utm_source=generator&theme=0`}
+                width="100%"
+                height="152"
+                style={{ border: 0, borderRadius: 10, marginTop: 10 }}
+                allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+                loading="lazy"
+              />
+            )}
+          </div>
         )}
         {exportNotice && !spotifyUrl && (
-          <p style={s.spotifyNotice}>{exportNotice}</p>
+          <div style={s.spotifyNotice}>
+            <div>{exportNotice}</div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              <a href={`${NODE_BASE}/login`} style={s.spotifyInlineLink}>
+                Reconnect Spotify Permissions →
+              </a>
+            </div>
+          </div>
+        )}
+        {copiedNotice && (
+          <p style={s.spotifyNotice}>{copiedNotice}</p>
         )}
 
         <div style={s.actionRow}>
@@ -490,17 +598,43 @@ const PlaylistGenerator = ({ onClose, onPlayTrack }) => {
           </button>
           <button
             type="button"
-            style={{ ...s.generateBtn, ...(status === 'generating' || status === 'exporting' ? s.generateBtnLoading : {}) }}
+            style={{ ...s.generateBtn, flex: 1.3, ...(status === 'generating' || status === 'exporting' ? s.generateBtnLoading : {}) }}
             onClick={handleExport}
             disabled={status === 'generating' || status === 'exporting'}
           >
-            {status === 'exporting' ? 'Exporting…' : 'Export to Spotify'}
+            {status === 'exporting'
+              ? 'Exporting…'
+              : generatedTracks.length > 0
+                ? 'Export This Playlist to Spotify'
+                : 'Generate & Export to Spotify'}
           </button>
         </div>
 
         {generatedTracks.length > 0 && (
           <div style={s.block}>
-            <span style={s.blockLabel}>Generated playlist ({generatedTracks.length} tracks)</span>
+            <div style={{ ...s.curveHeader, marginBottom: 8, flexWrap: 'wrap' }}>
+              <span style={{ ...s.blockLabel, marginBottom: 0 }}>
+                Generated playlist ({generatedTracks.length} tracks)
+              </span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {onPlayPlaylist && (
+                  <button
+                    type="button"
+                    onClick={() => onPlayPlaylist(generatedTracks)}
+                    style={s.trackPlayBtn}
+                  >
+                    ▶ Play All
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleCopySpotifyUris}
+                  style={s.trackPlayBtn}
+                >
+                  Copy Spotify Links
+                </button>
+              </div>
+            </div>
             <div style={s.trackPreviewList}>
               {generatedTracks.map((track, index) => {
                 const targetPct = Math.round(((track.target_energy ?? energyCurve[index] ?? 0.5) * 100));
@@ -552,7 +686,7 @@ const s = {
     zIndex: 1000, padding: 20, boxSizing: 'border-box',
   },
   modal: {
-    width: '100%', maxWidth: 440,
+    width: '100%', maxWidth: 480,
     backgroundColor: '#111118', border: '1px solid #1a1a2e',
     borderRadius: 20, padding: '28px 28px 24px',
     boxSizing: 'border-box', maxHeight: '88vh', overflowY: 'auto',
@@ -572,14 +706,7 @@ const s = {
     backgroundColor: '#090910', borderRadius: 12,
     border: '1px solid #1a1a2e', marginBottom: 24,
   },
-  sliderBlock: { marginBottom: 20 },
-  sliderHeader: {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    marginBottom: 8,
-  },
-  sliderLabel: { fontSize: 12, fontWeight: 700, letterSpacing: '0.5px', color: '#9ca3af' },
   sliderValue: { fontSize: 13, fontWeight: 700, color: '#1DB954', fontFamily: 'monospace' },
-  slider: { width: '100%', accentColor: '#1DB954', cursor: 'pointer', height: 4 },
   block: { marginBottom: 22 },
   searchResults: {
     maxHeight: 180, overflowY: 'auto', marginTop: 6,
@@ -645,25 +772,6 @@ const s = {
     display: 'block', fontSize: 12, fontWeight: 700, letterSpacing: '0.5px',
     color: '#9ca3af', marginBottom: 10,
   },
-  curveToggleRow: { display: 'flex', gap: 8 },
-  curveToggle: {
-    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-    padding: '10px 8px', borderRadius: 12,
-    border: '1px solid #1a1a2e', backgroundColor: '#090910',
-    cursor: 'pointer', fontSize: 11, fontWeight: 700,
-  },
-  curveToggleActive: {
-    backgroundColor: '#1DB954', borderColor: '#1DB954',
-  },
-  countRow: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' },
-  countPill: {
-    padding: '8px 16px', borderRadius: 20,
-    border: '1px solid #1a1a2e', backgroundColor: '#090910',
-    color: '#9ca3af', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-  },
-  countPillActive: {
-    backgroundColor: '#1DB954', borderColor: '#1DB954', color: '#000',
-  },
   customCountInput: {
     width: 72, padding: '8px 10px', borderRadius: 20,
     border: '1px solid #1a1a2e', backgroundColor: '#090910',
@@ -675,30 +783,11 @@ const s = {
   },
   generateBtn: {
     width: '100%', backgroundColor: '#1DB954', color: '#000',
-    border: 'none', padding: '14px 0', borderRadius: 50,
-    fontSize: 14, fontWeight: 800, letterSpacing: '0.5px', cursor: 'pointer',
+    border: 'none', padding: '14px 12px', borderRadius: 50,
+    fontSize: 13, fontWeight: 800, letterSpacing: '0.5px', cursor: 'pointer',
   },
   generateBtnLoading: {
     backgroundColor: '#12833c', cursor: 'default',
-  },
-  successWrap: {
-    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-    textAlign: 'center', paddingTop: 4,
-  },
-  successIcon: {
-    width: 48, height: 48, borderRadius: '50%', backgroundColor: '#1DB954',
-    color: '#000', fontSize: 24, fontWeight: 800,
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    marginBottom: 6,
-  },
-  successTitle: { margin: 0, fontSize: 16, fontWeight: 700, color: '#f3f4f6' },
-  successHint: { margin: '0 0 14px', fontSize: 13, color: '#6b7280' },
-  spotifyLink: {
-    display: 'inline-block', marginBottom: 20,
-    backgroundColor: 'transparent', color: '#1DB954',
-    border: '1px solid #1DB954', borderRadius: 50,
-    padding: '10px 24px', fontSize: 13, fontWeight: 700,
-    textDecoration: 'none',
   },
   trackPreviewList: {
     width: '100%', display: 'flex', flexDirection: 'column', gap: 2,
@@ -720,12 +809,6 @@ const s = {
     padding: '5px 10px', border: '1px solid #1DB954', borderRadius: 16,
     backgroundColor: 'transparent', color: '#1DB954', fontSize: 11,
     fontWeight: 700, cursor: 'pointer',
-  },
-  trackActualEnergy: { color: '#6b7280' },
-  doneBtn: {
-    width: '100%', backgroundColor: 'transparent', color: '#9ca3af',
-    border: '1px solid #2a2a3a', padding: '12px 0', borderRadius: 50,
-    fontSize: 13, fontWeight: 700, cursor: 'pointer',
   },
 };
 

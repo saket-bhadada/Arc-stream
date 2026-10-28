@@ -16,18 +16,20 @@ from psycopg2.extras import execute_batch
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ML_SERVICE_DIR: Final = PROJECT_ROOT / "ml-service"
-CSV_PATH: Final = ML_SERVICE_DIR / "training" / "archive" / "tracks_features.csv"
+DEFAULT_CSV_PATH: Final = ML_SERVICE_DIR / "training" / "archive" / "tracks_features.csv"
 BATCH_SIZE: Final = 500
 
 # The ML service directory is not an installable Python package (its name contains
 # a hyphen), so add it before importing the shared normalization implementation.
-if str(ML_SERVICE_DIR) not in sys.path:
-    sys.path.insert(0, str(ML_SERVICE_DIR))
+for candidate_dir in (ML_SERVICE_DIR, PROJECT_ROOT):
+    if candidate_dir.exists() and str(candidate_dir) not in sys.path:
+        sys.path.insert(0, str(candidate_dir))
 
 from app.config import FEATURE_COLS  # noqa: E402
 from app.feature_utils import normalize_row  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / "server" / ".env")
+load_dotenv(PROJECT_ROOT / ".env")
 
 # tracks_features.csv uses Spotify's ``id`` and ``name`` column names.
 ID_COL: Final = "id"
@@ -45,6 +47,11 @@ INSERT_SQL: Final = """
 
 def get_connection() -> PgConnection:
     """Return a configured database connection, or stop with a clear error."""
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        dsn = database_url.replace("postgresql+psycopg2://", "postgresql://", 1)
+        return psycopg2.connect(dsn)
+
     database_name = os.getenv("DB_DATABASE") or os.getenv("DB_NAME")
     required_env = ("DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD")
     missing = [key for key in required_env if not os.getenv(key)]
@@ -84,11 +91,26 @@ def build_rows(dataframe: pd.DataFrame) -> list[tuple[object, ...]]:
 
 def main() -> None:
     """Load the dataset, normalize audio features, and insert it in batches."""
-    if not CSV_PATH.is_file():
-        raise SystemExit(f"[Populate] ERROR - CSV not found: {CSV_PATH}")
+    force_seed = "--force" in sys.argv
+    csv_path = Path(os.getenv("CSV_PATH") or DEFAULT_CSV_PATH)
 
-    print(f"[Populate] Reading {CSV_PATH} ...")
-    dataframe = pd.read_csv(CSV_PATH)
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT extname FROM pg_extension WHERE extname = 'vector'")
+            if cursor.fetchone() is None:
+                raise SystemExit("[Populate] ERROR - pgvector extension not installed.")
+
+            cursor.execute("SELECT COUNT(*) FROM track_features")
+            existing_count = cursor.fetchone()[0]
+            if existing_count > 0 and not force_seed:
+                print(f"[Populate] track_features already has {existing_count:,} rows. Skipping seed (use --force to re-run).")
+                return
+
+    if not csv_path.is_file():
+        raise SystemExit(f"[Populate] ERROR - CSV not found: {csv_path}")
+
+    print(f"[Populate] Reading {csv_path} ...")
+    dataframe = pd.read_csv(csv_path)
 
     missing_columns = [column for column in REQUIRED_COLUMNS if column not in dataframe.columns]
     if missing_columns:
@@ -107,10 +129,6 @@ def main() -> None:
 
     with get_connection() as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT extname FROM pg_extension WHERE extname = 'vector'")
-            if cursor.fetchone() is None:
-                raise SystemExit("[Populate] ERROR - pgvector extension not installed.")
-
             total_rows = len(rows)
             inserted_rows = 0
             start_time = time.monotonic()

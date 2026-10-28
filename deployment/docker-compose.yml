@@ -1,0 +1,3 @@
+# Deployment Compose wrapper referencing the project root services
+include:
+  - ../docker-compose.yml

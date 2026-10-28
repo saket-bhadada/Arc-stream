@@ -15,6 +15,7 @@ export const fetchTrackVectors = async (trackIds) => {
   if (missing.length > 0) {
     const res = await fetch(`${NODE_BASE}/api/ai/track-vectors`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ track_ids: missing }),
     });
@@ -29,6 +30,7 @@ export const fetchTrackVectors = async (trackIds) => {
 export const requestBuffer = async (payload) => {
   const res = await fetch(`${NODE_BASE}/api/ai/buffer`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
@@ -40,7 +42,10 @@ export const requestBuffer = async (payload) => {
 export const searchSeedTracks = async (query = 'random', signal) => {
   const res = await fetch(
     `${NODE_BASE}/api/dashboard/search-seeds?q=${encodeURIComponent(query || 'random')}`,
-    signal ? { signal } : undefined,
+    {
+      credentials: 'include',
+      ...(signal ? { signal } : {}),
+    },
   );
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `search-seeds failed (${res.status})`);
@@ -50,6 +55,7 @@ export const searchSeedTracks = async (query = 'random', signal) => {
 export const requestPlaylist = async (payload) => {
   const res = await fetch(`${NODE_BASE}/api/dashboard/playlist`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });

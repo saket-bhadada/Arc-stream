@@ -1,4 +1,7 @@
+import dotenv from "dotenv";
 import SpotifyWebApi from "spotify-web-api-node";
+
+dotenv.config();
 
 const spotifyApi = new SpotifyWebApi({
     clientId: process.env.SPOTIFY_CLIENT_ID,

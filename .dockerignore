@@ -1,0 +1,12 @@
+.git/
+.idea/
+.vscode/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/venv/
+**/dist/
+**/server_output.log
+ml-service/training/archive/*.csv
+*.ipynb

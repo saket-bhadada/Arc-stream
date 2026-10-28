@@ -1,12 +1,36 @@
 import { randomUUID } from 'node:crypto';
-
+import dotenv from 'dotenv';
 import { Router } from 'express';
 
 import db from '../db.js';
+import spotifyApi from '../spotifyservice.js';
+
+dotenv.config();
 
 const router = Router();
 const ML_BASE = process.env.ML_SERVICE_URL || process.env.ML_BASE || 'http://localhost:8000';
 const SPOTIFY_BASE = 'https://api.spotify.com/v1';
+const REFRESH_COOKIE_NAME = 'arc_stream_token';
+const REFRESH_COOKIE_MAX_AGE = 90 * 24 * 60 * 60 * 1000;
+
+const cookieOption = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax',
+  maxAge: REFRESH_COOKIE_MAX_AGE,
+  path: '/',
+});
+
+const parseVectorString = (raw) => {
+  if (Array.isArray(raw)) return raw.map(Number);
+  if (typeof raw !== 'string') return null;
+  const values = raw
+    .replace(/^\[|\]$/g, '')
+    .split(',')
+    .map((v) => Number.parseFloat(v.trim()))
+    .filter(Number.isFinite);
+  return values.length === 7 ? values : null;
+};
 
 const spotifyFetch = async (path, accessToken, options = {}) => {
   const response = await fetch(`${SPOTIFY_BASE}${path}`, {
@@ -20,9 +44,59 @@ const spotifyFetch = async (path, accessToken, options = {}) => {
 
   if (response.status === 204) return null;
   if (!response.ok) {
-    throw new Error(`Spotify ${response.status} on ${path}: ${await response.text()}`);
+    const errorText = await response.text();
+    const error = new Error(`Spotify ${response.status} on ${path}: ${errorText}`);
+    error.status = response.status;
+    error.body = errorText;
+    throw error;
   }
   return response.json();
+};
+
+const refreshSpotifyAccessToken = async (req, res) => {
+  const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
+  if (!refreshToken) return null;
+  try {
+    spotifyApi.setRefreshToken(refreshToken);
+    const data = await spotifyApi.refreshAccessToken();
+    const { access_token: accessToken, refresh_token: rotated } = data.body || {};
+    if (accessToken && res && !res.headersSent) {
+      res.cookie(REFRESH_COOKIE_NAME, rotated || refreshToken, cookieOption());
+    }
+    return accessToken || null;
+  } catch (error) {
+    console.warn('[Spotify Auth] Refresh token grant failed:', error.message);
+    return null;
+  }
+};
+
+const spotifyFetchWithRefresh = async (req, res, tokenState, path, options = {}) => {
+  if (!tokenState.accessToken) {
+    const refreshed = await refreshSpotifyAccessToken(req, res);
+    if (refreshed) {
+      tokenState.accessToken = refreshed;
+      tokenState.refreshed = true;
+    }
+  }
+  if (!tokenState.accessToken) {
+    const err = new Error('Missing Spotify access token. Please log in with Spotify.');
+    err.status = 401;
+    throw err;
+  }
+
+  try {
+    return await spotifyFetch(path, tokenState.accessToken, options);
+  } catch (error) {
+    if (error.status === 401) {
+      const refreshed = await refreshSpotifyAccessToken(req, res);
+      if (refreshed) {
+        tokenState.accessToken = refreshed;
+        tokenState.refreshed = true;
+        return spotifyFetch(path, tokenState.accessToken, options);
+      }
+    }
+    throw error;
+  }
 };
 
 const mlFetch = async (path, options = {}) => {
@@ -54,6 +128,34 @@ router.get('/track-vector/:trackId', async (req, res) => {
   }
 });
 
+router.post('/track-vectors', async (req, res) => {
+  const trackIds = Array.isArray(req.body?.track_ids)
+    ? req.body.track_ids.filter((id) => typeof id === 'string' && id.trim())
+    : [];
+
+  if (trackIds.length === 0) {
+    return res.json({ vectors: {} });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT id AS track_id, z_vector::text AS z_vector
+       FROM track_features
+       WHERE id = ANY($1::text[])`,
+      [trackIds],
+    );
+    const vectors = {};
+    for (const id of trackIds) vectors[id] = null;
+    for (const row of rows) {
+      vectors[row.track_id] = parseVectorString(row.z_vector);
+    }
+    return res.json({ vectors });
+  } catch (error) {
+    console.error('[Track vectors] Error:', error.message);
+    return res.status(502).json({ error: 'Failed to fetch track vectors', detail: error.message });
+  }
+});
+
 router.post('/buffer', async (req, res) => {
   const {
     access_token: accessToken,
@@ -62,7 +164,16 @@ router.post('/buffer', async (req, res) => {
     current_z_sequence: currentZSequence,
   } = req.body;
 
-  if (!accessToken) {
+  const tokenState = { accessToken, refreshed: false };
+  if (!tokenState.accessToken) {
+    const refreshed = await refreshSpotifyAccessToken(req, res);
+    if (refreshed) {
+      tokenState.accessToken = refreshed;
+      tokenState.refreshed = true;
+    }
+  }
+
+  if (!tokenState.accessToken) {
     return res.status(401).json({ error: 'Missing access token' });
   }
   if (!isValidSequence(currentZSequence)) {
@@ -85,14 +196,16 @@ router.post('/buffer', async (req, res) => {
     });
 
     for (const track of tracks) {
-      await spotifyFetch(
+      await spotifyFetchWithRefresh(
+        req,
+        res,
+        tokenState,
         `/me/player/queue?uri=${encodeURIComponent(`spotify:track:${track.track_id}`)}`,
-        accessToken,
         { method: 'POST' },
       );
     }
 
-    const userProfile = await spotifyFetch('/me', accessToken);
+    const userProfile = await spotifyFetchWithRefresh(req, res, tokenState, '/me');
     for (const track of tracks) {
       await db.query(
         `INSERT INTO prediction_history
@@ -109,12 +222,155 @@ router.post('/buffer', async (req, res) => {
       );
     }
 
-    res.json({ success: true, session_id: sessionId, tracks });
+    res.json({
+      success: true,
+      session_id: sessionId,
+      tracks,
+      access_token: tokenState.refreshed ? tokenState.accessToken : undefined,
+    });
   } catch (error) {
     console.error('[Buffer] Error:', error.message);
     res.status(502).json({ error: error.message });
   }
 });
+
+const extractTrackId = (track) => {
+  const raw = track?.track_id || track?.id || track?.uri;
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('spotify:track:')) {
+    return trimmed.slice('spotify:track:'.length);
+  }
+  const match = trimmed.match(/open\.spotify\.com\/track\/([A-Za-z0-9]+)/);
+  if (match) return match[1];
+  return trimmed;
+};
+
+const exportTracksToSpotify = async (req, res, {
+  accessToken,
+  tracks,
+  playlistName,
+  resolvedCurve = [],
+}) => {
+  const tokenState = { accessToken, refreshed: false };
+  const cleanTrackIds = tracks.map(extractTrackId).filter(Boolean);
+  if (cleanTrackIds.length === 0) {
+    throw new Error('No valid Spotify track IDs found in generated playlist.');
+  }
+
+  const name = (playlistName && String(playlistName).trim())
+    || `Arc-Stream Mix ${new Date().toLocaleDateString('en-US')}`;
+  const curveSummary = Array.isArray(resolvedCurve) && resolvedCurve.length > 0
+    ? ` Energy curve: [${resolvedCurve.map((v) => Number(v).toFixed(2)).join(', ')}]`
+    : '';
+  const description = `Generated by Arc-Stream AI LSTM.${curveSummary}`.slice(0, 300);
+
+  let userProfile = null;
+  try {
+    userProfile = await spotifyFetchWithRefresh(req, res, tokenState, '/me');
+  } catch (profileErr) {
+    console.warn('[Playlist Export] Could not read /me profile, continuing with /me/playlists:', profileErr.message);
+  }
+
+  const createEndpoints = [];
+  if (userProfile?.id) {
+    createEndpoints.push({
+      path: `/users/${encodeURIComponent(userProfile.id)}/playlists`,
+      body: { name, description, public: false },
+    });
+  }
+  createEndpoints.push({
+    path: '/me/playlists',
+    body: { name, description, public: false },
+  });
+  if (userProfile?.id) {
+    createEndpoints.push({
+      path: `/users/${encodeURIComponent(userProfile.id)}/playlists`,
+      body: { name, description, public: true },
+    });
+  }
+  createEndpoints.push({
+    path: '/me/playlists',
+    body: { name, description, public: true },
+  });
+
+  let newPlaylist = null;
+  let lastCreateError = null;
+  for (const candidate of createEndpoints) {
+    try {
+      newPlaylist = await spotifyFetchWithRefresh(req, res, tokenState, candidate.path, {
+        method: 'POST',
+        body: JSON.stringify(candidate.body),
+      });
+      if (newPlaylist?.id) break;
+    } catch (err) {
+      lastCreateError = err;
+      console.warn(`[Playlist Export] Create attempt on ${candidate.path} (public=${candidate.body.public}) failed:`, err.message);
+    }
+  }
+
+  if (!newPlaylist?.id) {
+    throw lastCreateError || new Error('Spotify did not return a created playlist ID.');
+  }
+
+  const uris = cleanTrackIds.map((id) => `spotify:track:${id}`);
+  for (let index = 0; index < uris.length; index += 100) {
+    const chunk = uris.slice(index, index + 100);
+    const playlistIdEncoded = encodeURIComponent(newPlaylist.id);
+    try {
+      await spotifyFetchWithRefresh(req, res, tokenState, `/playlists/${playlistIdEncoded}/tracks`, {
+        method: 'POST',
+        body: JSON.stringify({ uris: chunk }),
+      });
+    } catch (tracksErr) {
+      console.warn('[Playlist Export] /tracks endpoint failed, trying /items fallback:', tracksErr.message);
+      await spotifyFetchWithRefresh(req, res, tokenState, `/playlists/${playlistIdEncoded}/items`, {
+        method: 'POST',
+        body: JSON.stringify({ uris: chunk }),
+      });
+    }
+  }
+
+  try {
+    const userSpotifyId = userProfile?.id || newPlaylist.owner?.id || 'spotify_user';
+    const { rows } = await db.query(
+      `INSERT INTO playlists
+         (user_spotify_id, spotify_playlist_id, name, energy_curve, track_count)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (spotify_playlist_id) DO UPDATE
+         SET name = EXCLUDED.name,
+             energy_curve = EXCLUDED.energy_curve,
+             track_count = EXCLUDED.track_count
+       RETURNING id`,
+      [userSpotifyId, newPlaylist.id, name, JSON.stringify(resolvedCurve), cleanTrackIds.length],
+    );
+    const dbPlaylistId = rows[0]?.id;
+    if (dbPlaylistId) {
+      for (const [position, trackId] of cleanTrackIds.entries()) {
+        await db.query(
+          `INSERT INTO playlist_tracks (playlist_id, track_id, position)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (playlist_id, position) DO UPDATE SET track_id = EXCLUDED.track_id`,
+          [dbPlaylistId, trackId, position],
+        );
+      }
+    }
+  } catch (dbErr) {
+    console.warn('[Playlist Export] Non-fatal DB save warning:', dbErr.message);
+  }
+
+  const playlistUrl = newPlaylist.external_urls?.spotify || `https://open.spotify.com/playlist/${newPlaylist.id}`;
+  return {
+    exported: true,
+    playlist_id: newPlaylist.id,
+    playlist_url: playlistUrl,
+    spotify_url: playlistUrl,
+    playlist_uri: newPlaylist.uri || `spotify:playlist:${newPlaylist.id}`,
+    name,
+    access_token: tokenState.refreshed ? tokenState.accessToken : undefined,
+  };
+};
 
 const createPlaylist = async (req, res) => {
   try {
@@ -129,6 +385,8 @@ const createPlaylist = async (req, res) => {
       track_count: trackCount,
       curve_type: curveType = 'arc',
       export_to_spotify: exportToSpotify = false,
+      tracks: preGeneratedTracks,
+      playlist: preGeneratedPlaylist,
     } = req.body || {};
 
     const resolvedCurve =
@@ -138,21 +396,33 @@ const createPlaylist = async (req, res) => {
           ? energyCurve
           : [0.3, 0.45, 0.6, 0.75, 0.85, 0.9, 0.8, 0.65, 0.5, 0.4];
 
-    const mlData = await mlFetch('/generate_playlist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        seed_track_ids: Array.isArray(seedTrackIds) ? seedTrackIds : [],
-        custom_energy_curve: resolvedCurve,
-        energy_curve: resolvedCurve,
-        current_z_sequence: Array.isArray(currentZSequence) ? currentZSequence : [],
-        session_history: Array.isArray(sessionHistory) ? sessionHistory : [],
-        track_count: Number(trackCount) || resolvedCurve.length || 10,
-        curve_type: curveType,
-      }),
-    });
+    const existingTracks = Array.isArray(preGeneratedTracks) && preGeneratedTracks.length > 0
+      ? preGeneratedTracks
+      : Array.isArray(preGeneratedPlaylist) && preGeneratedPlaylist.length > 0
+        ? preGeneratedPlaylist
+        : null;
 
-    const tracks = mlData.playlist || mlData.tracks || [];
+    let tracks = existingTracks;
+    let finalCurve = resolvedCurve;
+
+    if (!tracks || !exportToSpotify) {
+      const mlData = await mlFetch('/generate_playlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seed_track_ids: Array.isArray(seedTrackIds) ? seedTrackIds : [],
+          custom_energy_curve: resolvedCurve,
+          energy_curve: resolvedCurve,
+          current_z_sequence: Array.isArray(currentZSequence) ? currentZSequence : [],
+          session_history: Array.isArray(sessionHistory) ? sessionHistory : [],
+          track_count: Number(trackCount) || resolvedCurve.length || 10,
+          curve_type: curveType,
+        }),
+      });
+
+      tracks = mlData.playlist || mlData.tracks || [];
+      finalCurve = mlData.energy_curve || resolvedCurve;
+    }
 
     if (!exportToSpotify) {
       return res.status(200).json({
@@ -160,83 +430,28 @@ const createPlaylist = async (req, res) => {
         preview: true,
         track_count: tracks.length,
         tracks,
-        energy_curve: mlData.energy_curve || resolvedCurve,
+        playlist: tracks,
+        energy_curve: finalCurve,
       });
     }
 
     const name = playlistName || `Arc-Stream Mix ${new Date().toLocaleDateString('en-US')}`;
 
     try {
-      if (!accessToken) {
-        throw new Error('Missing Spotify access token');
-      }
-
-      const userProfile = await spotifyFetch('/me', accessToken);
-      const newPlaylist = await spotifyFetch('/me/playlists', accessToken, {
-        method: 'POST',
-        body: JSON.stringify({
-          name,
-          description: `Generated by Arc-Stream. Energy: [${resolvedCurve.map((v) => Number(v).toFixed(2)).join(', ')}]`,
-          public: false,
-        }),
+      const exportResult = await exportTracksToSpotify(req, res, {
+        accessToken,
+        tracks,
+        playlistName: name,
+        resolvedCurve: finalCurve,
       });
-
-      const uris = tracks
-        .map((track) => track.track_id)
-        .filter(Boolean)
-        .map((id) => (id.startsWith('spotify:track:') ? id : `spotify:track:${id}`));
-
-      for (let index = 0; index < uris.length; index += 100) {
-        const chunk = uris.slice(index, index + 100);
-        try {
-          await spotifyFetch(`/playlists/${newPlaylist.id}/tracks`, accessToken, {
-            method: 'POST',
-            body: JSON.stringify({ uris: chunk }),
-          });
-        } catch (err) {
-          if (err.message && err.message.includes('403')) {
-            console.warn('[Playlist] /tracks returned 403, attempting /items fallback...');
-            await spotifyFetch(`/playlists/${newPlaylist.id}/items`, accessToken, {
-              method: 'POST',
-              body: JSON.stringify({ uris: chunk }),
-            });
-          } else {
-            throw err;
-          }
-        }
-      }
-
-      try {
-        const { rows } = await db.query(
-          `INSERT INTO playlists
-             (user_spotify_id, spotify_playlist_id, name, energy_curve, track_count)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id`,
-          [userProfile.id, newPlaylist.id, name, JSON.stringify(resolvedCurve), tracks.length],
-        );
-        const playlistId = rows[0]?.id;
-        if (playlistId) {
-          for (const [position, track] of tracks.entries()) {
-            await db.query(
-              'INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES ($1, $2, $3)',
-              [playlistId, track.track_id, position],
-            );
-          }
-        }
-      } catch (dbErr) {
-        console.warn('[Playlist] Non-fatal DB save warning:', dbErr.message);
-      }
 
       return res.status(200).json({
         success: true,
-        exported: true,
-        playlist_id: newPlaylist.id,
-        playlist_url: newPlaylist.external_urls?.spotify,
-        spotify_url: newPlaylist.external_urls?.spotify,
-        name,
+        ...exportResult,
         track_count: tracks.length,
         tracks,
-        energy_curve: mlData.energy_curve || resolvedCurve,
+        playlist: tracks,
+        energy_curve: finalCurve,
       });
     } catch (spErr) {
       console.warn('[Playlist] Spotify export failed, returning generated tracks anyway:', spErr.message);
@@ -247,12 +462,53 @@ const createPlaylist = async (req, res) => {
         name,
         track_count: tracks.length,
         tracks,
-        energy_curve: mlData.energy_curve || resolvedCurve,
+        playlist: tracks,
+        energy_curve: finalCurve,
       });
     }
   } catch (error) {
     console.error('[Playlist] Error:', error.message);
     return res.status(502).json({ error: error.message });
+  }
+};
+
+const exportPlaylist = async (req, res) => {
+  const {
+    access_token: accessToken,
+    playlist_name: playlistName,
+    energy_curve: energyCurve = [],
+  } = req.body || {};
+  const tracks = Array.isArray(req.body?.tracks)
+    ? req.body.tracks
+    : Array.isArray(req.body?.playlist)
+      ? req.body.playlist
+      : [];
+
+  if (!Array.isArray(tracks) || tracks.length === 0 || tracks.some((track) => !extractTrackId(track))) {
+    return res.status(400).json({ error: 'tracks must be a non-empty array of tracks with track_id values' });
+  }
+
+  try {
+    const exportResult = await exportTracksToSpotify(req, res, {
+      accessToken,
+      tracks,
+      playlistName,
+      resolvedCurve: energyCurve,
+    });
+
+    return res.json({
+      success: true,
+      ...exportResult,
+      track_count: tracks.length,
+      tracks,
+      playlist: tracks,
+    });
+  } catch (error) {
+    console.error('[Export Playlist] Error:', error.message);
+    return res.status(error.status === 401 ? 401 : 502).json({
+      error: 'Failed to export playlist to Spotify',
+      detail: error.message,
+    });
   }
 };
 
@@ -268,79 +524,6 @@ router.post('/playList', createPlaylist);
 const generatePlaylistPreview = async (req, res) => {
   req.body = { ...req.body, export_to_spotify: false };
   return createPlaylist(req, res);
-};
-
-const exportPlaylist = async (req, res) => {
-  const {
-    access_token: accessToken,
-    playlist_name: playlistName,
-    energy_curve: energyCurve = [],
-  } = req.body;
-  const tracks = Array.isArray(req.body.tracks) ? req.body.tracks : req.body.playlist;
-
-  if (!accessToken) {
-    return res.status(401).json({ error: 'Missing access token' });
-  }
-  if (!Array.isArray(tracks) || tracks.length === 0 || tracks.some((track) => !track?.track_id)) {
-    return res.status(400).json({ error: 'tracks must be a non-empty array of tracks with track_id values' });
-  }
-
-  try {
-    const userProfile = await spotifyFetch('/me', accessToken);
-    const name = playlistName || `Arc-Stream Mix ${new Date().toLocaleDateString('en-US')}`;
-    const newPlaylist = await spotifyFetch('/me/playlists', accessToken, {
-      method: 'POST',
-      body: JSON.stringify({
-        name,
-        description: 'Generated by Arc-Stream.',
-        public: false,
-      }),
-    });
-
-    const uris = tracks.map((track) => `spotify:track:${track.track_id}`);
-    for (let index = 0; index < uris.length; index += 100) {
-      const chunk = uris.slice(index, index + 100);
-      try {
-        await spotifyFetch(`/playlists/${newPlaylist.id}/tracks`, accessToken, {
-          method: 'POST',
-          body: JSON.stringify({ uris: chunk }),
-        });
-      } catch (error) {
-        if (!error.message.includes('403')) throw error;
-        await spotifyFetch(`/playlists/${newPlaylist.id}/items`, accessToken, {
-          method: 'POST',
-          body: JSON.stringify({ uris: chunk }),
-        });
-      }
-    }
-
-    const { rows } = await db.query(
-      `INSERT INTO playlists
-         (user_spotify_id, spotify_playlist_id, name, energy_curve, track_count)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
-      [userProfile.id, newPlaylist.id, name, JSON.stringify(energyCurve), tracks.length],
-    );
-    const playlistId = rows[0].id;
-    for (const [position, track] of tracks.entries()) {
-      await db.query(
-        'INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES ($1, $2, $3)',
-        [playlistId, track.track_id, position],
-      );
-    }
-
-    return res.json({
-      success: true,
-      playlist_id: newPlaylist.id,
-      playlist_url: newPlaylist.external_urls?.spotify,
-      name,
-      track_count: tracks.length,
-      tracks,
-    });
-  } catch (error) {
-    console.error('[Export Playlist] Error:', error.message);
-    return res.status(502).json({ error: 'Failed to export playlist', detail: error.message });
-  }
 };
 
 router.post('/generate-playlist', generatePlaylistPreview);
@@ -409,7 +592,16 @@ router.post('/queue-commit', async (req, res) => {
     tracks,
   } = req.body;
 
-  if (!accessToken) {
+  const tokenState = { accessToken, refreshed: false };
+  if (!tokenState.accessToken) {
+    const refreshed = await refreshSpotifyAccessToken(req, res);
+    if (refreshed) {
+      tokenState.accessToken = refreshed;
+      tokenState.refreshed = true;
+    }
+  }
+
+  if (!tokenState.accessToken) {
     return res.status(401).json({ error: 'Missing access token' });
   }
 
@@ -428,16 +620,18 @@ router.post('/queue-commit', async (req, res) => {
   const deviceQuery = deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : '';
 
   for (const track of tracks) {
-    const trackId = track?.track_id;
+    const trackId = extractTrackId(track);
     if (!trackId) {
       failed.push({ track_id: null, error: 'Missing track_id' });
       continue;
     }
 
     try {
-      await spotifyFetch(
+      await spotifyFetchWithRefresh(
+        req,
+        res,
+        tokenState,
         `/me/player/queue?uri=${encodeURIComponent(`spotify:track:${trackId}`)}${deviceQuery}`,
-        accessToken,
         { method: 'POST' },
       );
       queued.push(trackId);
@@ -452,9 +646,9 @@ router.post('/queue-commit', async (req, res) => {
 
   if (queued.length > 0) {
     try {
-      const userProfile = await spotifyFetch('/me', accessToken);
+      const userProfile = await spotifyFetchWithRefresh(req, res, tokenState, '/me');
       const queuedSet = new Set(queued);
-      const successfulTracks = tracks.filter((t) => queuedSet.has(t.track_id));
+      const successfulTracks = tracks.filter((t) => queuedSet.has(extractTrackId(t)));
 
       for (const track of successfulTracks) {
         await db.query(
@@ -466,7 +660,7 @@ router.post('/queue-commit', async (req, res) => {
             userProfile.id,
             targetEnergy,
             JSON.stringify(track.predicted_vector || []),
-            track.track_id,
+            extractTrackId(track),
             5,
           ],
         );
@@ -481,6 +675,7 @@ router.post('/queue-commit', async (req, res) => {
     session_id: sessionId,
     queued,
     failed,
+    access_token: tokenState.refreshed ? tokenState.accessToken : undefined,
   });
 });
 
@@ -528,16 +723,20 @@ router.get('/search-seeds', async (req, res) => {
 
 router.post('/recently-played', async (req, res) => {
   const accessToken = req.body?.access_token;
-  if (typeof accessToken !== 'string' || !accessToken) {
-    return res.status(400).json({ error: 'Missing access_token' });
-  }
+  const tokenState = { accessToken, refreshed: false };
 
   try {
-    const data = await spotifyFetch('/me/player/recently-played?limit=1', accessToken);
+    const data = await spotifyFetchWithRefresh(
+      req,
+      res,
+      tokenState,
+      '/me/player/recently-played?limit=1',
+    );
     const latest = data?.items?.[0];
     return res.json({
       track: latest?.track?.type === 'track' ? latest.track : null,
       played_at: latest?.played_at ?? null,
+      access_token: tokenState.refreshed ? tokenState.accessToken : undefined,
     });
   } catch (error) {
     console.error('[Recently Played] Spotify request failed:', error.message);
@@ -550,22 +749,32 @@ router.post('/recently-played', async (req, res) => {
 
 router.put('/play', async (req, res) => {
   const { access_token: accessToken, device_id: deviceId, uris } = req.body;
-  if (!accessToken || !deviceId) {
-    return res.status(400).json({ error: 'Missing access_token or device_id' });
+  const tokenState = { accessToken, refreshed: false };
+  if (!deviceId) {
+    return res.status(400).json({ error: 'Missing device_id' });
   }
 
   try {
-    await spotifyFetch('/me/player', accessToken, {
+    await spotifyFetchWithRefresh(req, res, tokenState, '/me/player', {
       method: 'PUT',
       body: JSON.stringify({ device_ids: [deviceId], play: false }),
     });
     if (Array.isArray(uris) && uris.length > 0) {
-      await spotifyFetch(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, accessToken, {
-        method: 'PUT',
-        body: JSON.stringify({ uris }),
-      });
+      await spotifyFetchWithRefresh(
+        req,
+        res,
+        tokenState,
+        `/me/player/play?device_id=${encodeURIComponent(deviceId)}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ uris }),
+        },
+      );
     }
-    return res.json({ success: true });
+    return res.json({
+      success: true,
+      access_token: tokenState.refreshed ? tokenState.accessToken : undefined,
+    });
   } catch (error) {
     console.error('[Play] Error:', error.message);
     return res.status(502).json({ error: error.message });

@@ -1,0 +1,110 @@
+services:
+  # ─── 1. PostgreSQL + pgvector Database ─────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: arc-stream-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-arc_stream}
+    ports:
+      - "${DB_EXPOSE_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/database_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-arc_stream}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ─── 2. FastAPI + PyTorch LSTM Recommendation & Playlist Engine ────────────
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: arc-stream-ml
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-arc_stream}
+      CSV_PATH: /data/tracks_features.csv
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ml-service/training/archive/tracks_features.csv:/data/tracks_features.csv:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # ─── 3. One-Shot Dataset Seeder (Populates track_features if empty) ────────
+  db-seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ml-service
+    container_name: arc-stream-seed
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-arc_stream}
+      CSV_PATH: /data/tracks_features.csv
+    volumes:
+      - ./ml-service/training/archive/tracks_features.csv:/data/tracks_features.csv:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "database/populate_db.py"]
+
+  # ─── 4. Node.js Express Gateway & Spotify OAuth Server ─────────────────────
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: arc-stream-server
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    environment:
+      PORT: 3000
+      NODE_ENV: development
+      FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1:5173}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:3000/callback}
+      ML_SERVICE_URL: http://ml-service:8000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_DATABASE: ${POSTGRES_DB:-arc_stream}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-arc_stream}
+      SCHEMA_PATH: /app/database/database_schema.sql
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./database/database_schema.sql:/app/database/database_schema.sql:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      ml-service:
+        condition: service_started
+
+  # ─── 5. React + Vite Client UI ─────────────────────────────────────────────
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+      args:
+        VITE_NODE_BASE: ${VITE_NODE_BASE:-http://127.0.0.1:3000}
+    container_name: arc-stream-client
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
+
+volumes:
+  postgres_data:

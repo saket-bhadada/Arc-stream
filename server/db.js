@@ -27,7 +27,12 @@ const db = new pg.Pool({
 });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const schemaPath = path.join(__dirname, '../database/database_schema.sql');
+const candidateSchemaPaths = [
+  process.env.SCHEMA_PATH,
+  path.join(__dirname, '../database/database_schema.sql'),
+  path.join(__dirname, 'database/database_schema.sql'),
+].filter(Boolean);
+const schemaPath = candidateSchemaPaths.find((p) => fs.existsSync(p)) || candidateSchemaPaths[0];
 
 export const databaseReady = (async () => {
   console.log('[DB] Attempting to connect to the database...');

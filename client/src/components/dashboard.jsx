@@ -611,7 +611,12 @@ const PlannerDrawer = ({ onClose, generatedTracks, onOpenGenerator }) => {
           </div>
         ))}
 
-        <button style={s.queueBtn} onClick={onOpenGenerator}>Open playlist generator</button>
+        <button
+          style={s.queueBtn}
+          onClick={() => onOpenGenerator({ startEnergy, targetEnergy, trackCount, curveType })}
+        >
+          Open playlist generator
+        </button>
       </aside>
     </>
   );
@@ -634,6 +639,7 @@ const DashboardPage = () => {
   const [queueStatus, setQueueStatus] = useState({ kind: 'idle', msg: '' });
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [generatorPreset, setGeneratorPreset] = useState(null);
   const [generatedTracks, setGeneratedTracks] = useState([]);
   const [useEmbedFallback, setUseEmbedFallback] = useState(false);
   const [activeEmbedTrackId, setActiveEmbedTrackId] = useState(null);
@@ -876,15 +882,20 @@ const DashboardPage = () => {
         <PlannerDrawer
           onClose={() => setPlannerOpen(false)}
           generatedTracks={generatedTracks}
-          onOpenGenerator={() => setGeneratorOpen(true)}
+          onOpenGenerator={(preset) => {
+            if (preset && typeof preset === 'object') setGeneratorPreset(preset);
+            setGeneratorOpen(true);
+          }}
         />
       )}
       {generatorOpen && (
         <PlaylistGenerator
           accessToken={accessToken}
+          initialPreset={generatorPreset}
           onClose={() => setGeneratorOpen(false)}
           onPlayTrack={playGeneratedTrack}
-          onGenerated={(tracks) => { setGeneratedTracks(tracks ?? []); playGenerated(tracks); }}
+          onPlayPlaylist={playGenerated}
+          onGenerated={(tracks) => setGeneratedTracks(tracks ?? [])}
         />
       )}
     </div>
