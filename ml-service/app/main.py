@@ -418,3 +418,70 @@ def search_tracks(q: str = Query(default="random"), limit: int = 10, db: Session
             for t in results
         ]
     }
+
+
+class PromptPlaylistRequest(BaseModel):
+    prompt: str = Field(..., min_length=2)
+    track_count: int = Field(default=10, ge=5, le=25)
+    seed_track_ids: Optional[List[str]] = Field(default=[])
+
+@app.post("/generate_from_prompt")
+async def generate_from_prompt(payload: PromptPlaylistRequest, db: Session = Depends(database.get_db)):
+    # 1. If user selected seed songs in UI, load their actual 7D acoustic telemetry from PostgreSQL
+    input_songs_metadata = []
+    selected_rows = []
+    if payload.seed_track_ids:
+        selected_rows = db.query(models.TrackFeature).filter(
+            models.TrackFeature.track_id.in_(payload.seed_track_ids)
+        ).all()
+        for r in selected_rows:
+            c_num, c_let = get_camelot(r.key, r.mode)
+            input_songs_metadata.append({
+                "track_id": r.track_id,
+                "track_name": getattr(r, "track_name", r.track_id[:8]),
+                "artist_name": getattr(r, "artist_name", "Unknown"),
+                "energy": round(float(r.energy), 3),
+                "valence": round(float(r.valence), 3),
+                "tempo": round(float(r.tempo), 1),
+                "camelot": f"{c_num}{c_let}",
+            })
+
+    # 2. Ask Ollama (with full seed telemetry) to plan the trajectory
+    plan = await plan_playlist_from_prompt(
+        prompt=payload.prompt,
+        track_count=payload.track_count,
+        input_songs=input_songs_metadata,
+    )
+
+    # 3. Prioritize user's explicitly selected track_ids first, then fill remaining slots with Ollama's suggestions
+    matched_seeds = [r.track_id for r in selected_rows]
+    for q in plan.seed_queries:
+        if len(matched_seeds) >= 5:
+            break
+        match = db.query(models.TrackFeature).filter(
+            or_(
+                models.TrackFeature.track_name.ilike(f"%{q}%"),
+                models.TrackFeature.artist_name.ilike(f"%{q}%"),
+            )
+        ).first()
+        if match and match.track_id not in matched_seeds:
+            matched_seeds.append(match.track_id)
+
+    # 4. Run the PyTorch LSTM + Camelot Harmonic pgvector search
+    req = PlaylistRequest(
+        seed_track_ids=matched_seeds[:5],
+        custom_energy_curve=plan.energy_curve,
+        track_count=len(plan.energy_curve),
+        curve_type="custom",
+    )
+    result = generate_playlist_core(req, db)
+
+    return {
+        "title": plan.playlist_title,
+        "vibe_summary": plan.vibe_summary,
+        "target_valence": plan.target_valence,
+        "recommended_bpm_range": plan.recommended_bpm_range,
+        "suggested_seeds": plan.seed_queries,
+        "energy_curve": plan.energy_curve,
+        "tracks": result["tracks"],
+    }
