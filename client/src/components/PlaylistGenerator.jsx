@@ -99,6 +99,7 @@ const PlaylistGenerator = ({
   onPlayPlaylist,
   onGenerated,
   initialPreset,
+  onOpenLlmStudio,
 }) => {
   const accessToken = usePlayerStore((state) => state.accessToken);
   const updateAccessToken = usePlayerStore((state) => state.updateAccessToken);
@@ -416,7 +417,27 @@ const PlaylistGenerator = ({
     <div style={s.overlay} onClick={onClose}>
       <div style={s.modal} onClick={(e) => e.stopPropagation()}>
         <div style={s.header}>
-          <span style={s.title}>Custom energy playlist</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={s.title}>Custom energy playlist</span>
+            {onOpenLlmStudio && (
+              <button
+                type="button"
+                onClick={onOpenLlmStudio}
+                style={{
+                  background: 'rgba(29, 185, 84, 0.12)',
+                  border: '1px solid #1DB954',
+                  color: '#1DB954',
+                  padding: '3px 10px',
+                  borderRadius: 14,
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                ✨ Switch to LLM Prompt Model
+              </button>
+            )}
+          </div>
           <button style={s.closeBtn} onClick={onClose} aria-label="Close">×</button>
         </div>
 

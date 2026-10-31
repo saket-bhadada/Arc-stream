@@ -6,6 +6,7 @@ import VectorRadarChart from './VectorRadarChart';
 import TrajectoryGraph from './TrajectoryGraph';
 import QueueTray from './QueueTray';
 import PlaylistGenerator from './PlaylistGenerator'; // Phase 8
+import LlmPromptGenerator from './LlmPromptGenerator';
 
 const SPOTIFY_BASE = 'https://api.spotify.com/v1';
 
@@ -559,7 +560,7 @@ const CURVES = [
 // Drawer: trajectory preview + planner controls, with a hand-off to the Phase 8
 // PlaylistGenerator. Once a playlist is generated, generatedTracks overlays the
 // actual energies on the planned curve.
-const PlannerDrawer = ({ onClose, generatedTracks, onOpenGenerator }) => {
+const PlannerDrawer = ({ onClose, generatedTracks, onOpenGenerator, onOpenLlmStudio }) => {
   const [startEnergy,  setStartEnergy]  = useState(0.3);
   const [targetEnergy, setTargetEnergy] = useState(0.8);
   const [trackCount,   setTrackCount]   = useState(10);
@@ -612,10 +613,29 @@ const PlannerDrawer = ({ onClose, generatedTracks, onOpenGenerator }) => {
         ))}
 
         <button
+          style={{
+            ...s.queueBtn,
+            borderColor: '#1DB954',
+            color: '#1DB954',
+            backgroundColor: 'rgba(29, 185, 84, 0.12)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+          }}
+          onClick={() => {
+            onClose();
+            onOpenLlmStudio();
+          }}
+        >
+          <span>✨</span> Ask LLM Prompt DJ Model
+        </button>
+
+        <button
           style={s.queueBtn}
           onClick={() => onOpenGenerator({ startEnergy, targetEnergy, trackCount, curveType })}
         >
-          Open playlist generator
+          Open manual curve generator
         </button>
       </aside>
     </>
@@ -639,6 +659,7 @@ const DashboardPage = () => {
   const [queueStatus, setQueueStatus] = useState({ kind: 'idle', msg: '' });
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [llmStudioOpen, setLlmStudioOpen] = useState(false);
   const [generatorPreset, setGeneratorPreset] = useState(null);
   const [generatedTracks, setGeneratedTracks] = useState([]);
   const [useEmbedFallback, setUseEmbedFallback] = useState(false);
@@ -808,6 +829,22 @@ const DashboardPage = () => {
         </div>
 
         <div style={s.headerRight}>
+          <button
+            style={{
+              ...s.ghostBtn,
+              border: '1px solid #1DB954',
+              color: '#1DB954',
+              background: 'rgba(29, 185, 84, 0.12)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontWeight: 800,
+            }}
+            onClick={() => setLlmStudioOpen(true)}
+            title="Design a playlist from natural language vibe prompt using LLM"
+          >
+            <span>✨</span> AI Prompt DJ
+          </button>
           <button style={s.ghostBtn} onClick={() => setPlannerOpen(true)}>Playlist planner</button>
           <button style={s.ghostBtn} onClick={handleLogout}>Log out</button>
         </div>
@@ -877,7 +914,7 @@ const DashboardPage = () => {
         </div>
       </main>
 
-      {/* 5 ─ Modal/drawer: TrajectoryGraph + PlaylistGenerator */}
+      {/* 5 ─ Modal/drawer: TrajectoryGraph + PlaylistGenerator + LlmPromptGenerator */}
       {plannerOpen && (
         <PlannerDrawer
           onClose={() => setPlannerOpen(false)}
@@ -886,6 +923,7 @@ const DashboardPage = () => {
             if (preset && typeof preset === 'object') setGeneratorPreset(preset);
             setGeneratorOpen(true);
           }}
+          onOpenLlmStudio={() => setLlmStudioOpen(true)}
         />
       )}
       {generatorOpen && (
@@ -896,6 +934,21 @@ const DashboardPage = () => {
           onPlayTrack={playGeneratedTrack}
           onPlayPlaylist={playGenerated}
           onGenerated={(tracks) => setGeneratedTracks(tracks ?? [])}
+          onOpenLlmStudio={() => {
+            setGeneratorOpen(false);
+            setLlmStudioOpen(true);
+          }}
+        />
+      )}
+      {llmStudioOpen && (
+        <LlmPromptGenerator
+          onClose={() => setLlmStudioOpen(false)}
+          onPlayTrack={playGeneratedTrack}
+          onPlayPlaylist={playGenerated}
+          onTransferToPlanner={({ curve, tracks, title }) => {
+            if (tracks) setGeneratedTracks(tracks);
+            setPlannerOpen(true);
+          }}
         />
       )}
     </div>

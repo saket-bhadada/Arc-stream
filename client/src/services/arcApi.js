@@ -63,3 +63,19 @@ export const requestPlaylist = async (payload) => {
   if (!res.ok) throw new Error(data.detail?.message || data.detail || data.error || `playlist failed (${res.status})`);
   return data;
 };
+
+export const generatePromptPlaylist = async (payload, signal) => {
+  const res = await fetch(`${NODE_BASE}/api/dashboard/prompt-playlist`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    ...(signal ? { signal } : {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.detail?.message || data.detail || data.error || `Prompt playlist generation failed (${res.status})`);
+  }
+  return data;
+};
+

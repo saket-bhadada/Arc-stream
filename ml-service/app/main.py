@@ -26,6 +26,7 @@ import numpy as np
 from . import models, database
 from .inference import load_inference_model, predict_next_z_vector, predict_anchored_z_vector
 from .trajectory import generate_energy_curve
+from app.prompt.ollama_planner import plan_playlist_from_prompt
 
 load_dotenv()
 
@@ -159,135 +160,150 @@ async def predict_buffer(payload: BufferRequest) -> dict[str, list[dict[str, obj
     return {"tracks": [track]}
 
 
+def get_camelot(key: Optional[int], mode: Optional[int]) -> tuple[int, str]:
+    """Maps Spotify key (0-11) and mode (1=Major, 0=Minor) to Camelot key (e.g. 8B, 5A)."""
+    if key is None or key < 0 or key > 11:
+        return (8, "B" if mode == 1 else "A")
+    major_map = {0: 8, 1: 3, 2: 10, 3: 5, 4: 12, 5: 7, 6: 2, 7: 9, 8: 4, 9: 11, 10: 6, 11: 1}
+    minor_map = {0: 5, 1: 12, 2: 7, 3: 2, 4: 9, 5: 4, 6: 11, 7: 6, 8: 1, 9: 8, 10: 3, 11: 10}
+    if mode == 1:
+        return (major_map.get(key, 8), "B")
+    return (minor_map.get(key, 5), "A")
+
+
+def generate_playlist_core(payload: PlaylistRequest, db: Session) -> dict:
+    raw_curve = (
+        payload.custom_energy_curve
+        if payload.custom_energy_curve and len(payload.custom_energy_curve) > 0
+        else payload.energy_curve
+    )
+    effective_count = max(1, min(30, int(payload.track_count or (len(raw_curve) if raw_curve else 10))))
+
+    if raw_curve and len(raw_curve) == effective_count:
+        energy_targets = [float(np.clip(val, 0.0, 1.0)) for val in raw_curve]
+    else:
+        energy_targets = generate_energy_curve(
+            start_energy=payload.start_energy,
+            target_energy=payload.target_energy,
+            count=effective_count,
+            curve_type=payload.curve_type,
+            custom_points=raw_curve,
+        )
+
+    seed_ids = [tid for tid in (payload.seed_track_ids or []) if tid]
+    seed_vectors: List[List[float]] = []
+
+    if seed_ids:
+        seed_rows = (
+            db.query(models.TrackFeature)
+            .filter(models.TrackFeature.id.in_(seed_ids))
+            .all()
+        )
+        seed_map = {row.id: row.z_vector for row in seed_rows if row.z_vector is not None}
+        ordered_seeds = [seed_map[tid] for tid in seed_ids if tid in seed_map]
+        seed_vectors = [[float(x) for x in vector] for vector in ordered_seeds]
+
+    if not seed_vectors and payload.current_z_sequence:
+        valid_seq = [
+            [float(x) for x in vec[:LATENT_DIM]]
+            for vec in payload.current_z_sequence
+            if isinstance(vec, (list, tuple)) and len(vec) >= LATENT_DIM
+        ]
+        if valid_seq:
+            seed_vectors = valid_seq[-5:]
+
+    if not seed_vectors:
+        start_e = float(energy_targets[0]) if energy_targets else 0.5
+        fallback_rows = (
+            db.query(models.TrackFeature)
+            .order_by(func.abs(models.TrackFeature.energy - start_e))
+            .limit(5)
+            .all()
+        )
+        for row in fallback_rows:
+            if row.z_vector is not None:
+                seed_vectors.append([float(x) for x in row.z_vector])
+
+    if not seed_vectors:
+        seed_vectors = [[0.5] * LATENT_DIM for _ in range(5)]
+
+    seed_count = len(seed_vectors)
+    while len(seed_vectors) < 5:
+        seed_vectors.insert(0, list(seed_vectors[0]))
+    seed_vectors = seed_vectors[-5:]
+
+    seed_centroid = np.mean(np.array(seed_vectors, dtype=np.float32), axis=0)
+    rolling_seq = [list(vec) for vec in seed_vectors[-5:]]
+    excluded_ids = set(seed_ids) | set(payload.session_history or [])
+    generated_tracks = []
+
+    for step_idx, target_e in enumerate(energy_targets):
+        target_e_val = float(np.clip(target_e, 0.0, 1.0))
+
+        # 1. Run LSTM on the 5-track rolling sequence
+        lstm_pred = np.array(
+            predict_next_z_vector(rolling_seq, target_e_val),
+            dtype=np.float32,
+        )
+
+        # 2. Blend LSTM output with 5-Song Acoustic Centroid (0.55 * lstm_pred + 0.45 * seed_centroid)
+        blended = 0.55 * lstm_pred + 0.45 * seed_centroid
+
+        # 3. Strictly pin index 1 (energy) to target_e from the user's graph
+        blended[1] = target_e_val
+        ideal_z = [float(np.clip(x, 0.0, 1.0)) for x in blended]
+
+        # 4. Query TrackFeature in PostgreSQL excluding already-used track IDs within ±0.08 energy band
+        energy_band = 0.08
+        base_query = db.query(models.TrackFeature)
+        if excluded_ids:
+            base_query = base_query.filter(~models.TrackFeature.id.in_(excluded_ids))
+
+        band_match = (
+            base_query.filter(
+                models.TrackFeature.energy.between(
+                    max(0.0, target_e_val - energy_band),
+                    min(1.0, target_e_val + energy_band),
+                )
+            )
+            .order_by(models.TrackFeature.z_vector.l2_distance(ideal_z))
+            .first()
+        )
+
+        match = band_match or (
+            base_query.order_by(models.TrackFeature.z_vector.l2_distance(ideal_z)).first()
+        )
+
+        if match:
+            excluded_ids.add(match.id)
+            match_z = [float(x) for x in match.z_vector]
+            rolling_seq = (rolling_seq + [match_z])[-5:]
+
+            dist_to_ideal = float(np.linalg.norm(np.array(match_z) - np.array(ideal_z)))
+            generated_tracks.append({
+                "step": step_idx + 1,
+                "track_id": match.id,
+                "track_name": match.track_name or f"Track {match.id[:8]}",
+                "artist_name": match.artists or "Spotify Artist",
+                "target_energy": round(target_e_val, 3),
+                "actual_energy": round(float(match.energy), 3),
+                "vector_distance": round(dist_to_ideal, 4),
+                "z_vector": match_z,
+            })
+
+    return {
+        "seed_count": seed_count,
+        "energy_curve": energy_targets,
+        "tracks": generated_tracks,
+        "playlist": generated_tracks,
+        "total_tracks": len(generated_tracks),
+    }
+
+
 @app.post("/generate_playlist")
 async def generate_playlist(payload: PlaylistRequest, db: Session = Depends(database.get_db)):
     try:
-        raw_curve = (
-            payload.custom_energy_curve
-            if payload.custom_energy_curve and len(payload.custom_energy_curve) > 0
-            else payload.energy_curve
-        )
-        effective_count = max(1, min(30, int(payload.track_count or (len(raw_curve) if raw_curve else 10))))
-
-        if raw_curve and len(raw_curve) == effective_count:
-            energy_targets = [float(np.clip(val, 0.0, 1.0)) for val in raw_curve]
-        else:
-            energy_targets = generate_energy_curve(
-                start_energy=payload.start_energy,
-                target_energy=payload.target_energy,
-                count=effective_count,
-                curve_type=payload.curve_type,
-                custom_points=raw_curve,
-            )
-
-        seed_ids = [tid for tid in (payload.seed_track_ids or []) if tid]
-        seed_vectors: List[List[float]] = []
-
-        if seed_ids:
-            seed_rows = (
-                db.query(models.TrackFeature)
-                .filter(models.TrackFeature.id.in_(seed_ids))
-                .all()
-            )
-            seed_map = {row.id: row.z_vector for row in seed_rows if row.z_vector is not None}
-            ordered_seeds = [seed_map[tid] for tid in seed_ids if tid in seed_map]
-            seed_vectors = [[float(x) for x in vector] for vector in ordered_seeds]
-
-        if not seed_vectors and payload.current_z_sequence:
-            valid_seq = [
-                [float(x) for x in vec[:LATENT_DIM]]
-                for vec in payload.current_z_sequence
-                if isinstance(vec, (list, tuple)) and len(vec) >= LATENT_DIM
-            ]
-            if valid_seq:
-                seed_vectors = valid_seq[-5:]
-
-        if not seed_vectors:
-            start_e = float(energy_targets[0]) if energy_targets else 0.5
-            fallback_rows = (
-                db.query(models.TrackFeature)
-                .order_by(func.abs(models.TrackFeature.energy - start_e))
-                .limit(5)
-                .all()
-            )
-            for row in fallback_rows:
-                if row.z_vector is not None:
-                    seed_vectors.append([float(x) for x in row.z_vector])
-
-        if not seed_vectors:
-            seed_vectors = [[0.5] * LATENT_DIM for _ in range(5)]
-
-        seed_count = len(seed_vectors)
-        while len(seed_vectors) < 5:
-            seed_vectors.insert(0, list(seed_vectors[0]))
-        seed_vectors = seed_vectors[-5:]
-
-        seed_centroid = np.mean(np.array(seed_vectors, dtype=np.float32), axis=0)
-        rolling_seq = [list(vec) for vec in seed_vectors[-5:]]
-        excluded_ids = set(seed_ids) | set(payload.session_history or [])
-        generated_tracks = []
-
-        for step_idx, target_e in enumerate(energy_targets):
-            target_e_val = float(np.clip(target_e, 0.0, 1.0))
-
-            # 1. Run LSTM on the 5-track rolling sequence
-            lstm_pred = np.array(
-                predict_next_z_vector(rolling_seq, target_e_val),
-                dtype=np.float32,
-            )
-
-            # 2. Blend LSTM output with 5-Song Acoustic Centroid (0.55 * lstm_pred + 0.45 * seed_centroid)
-            blended = 0.55 * lstm_pred + 0.45 * seed_centroid
-
-            # 3. Strictly pin index 1 (energy) to target_e from the user's graph
-            blended[1] = target_e_val
-            ideal_z = [float(np.clip(x, 0.0, 1.0)) for x in blended]
-
-            # 4. Query TrackFeature in PostgreSQL excluding already-used track IDs within ±0.08 energy band
-            energy_band = 0.08
-            base_query = db.query(models.TrackFeature)
-            if excluded_ids:
-                base_query = base_query.filter(~models.TrackFeature.id.in_(excluded_ids))
-
-            band_match = (
-                base_query.filter(
-                    models.TrackFeature.energy.between(
-                        max(0.0, target_e_val - energy_band),
-                        min(1.0, target_e_val + energy_band),
-                    )
-                )
-                .order_by(models.TrackFeature.z_vector.l2_distance(ideal_z))
-                .first()
-            )
-
-            match = band_match or (
-                base_query.order_by(models.TrackFeature.z_vector.l2_distance(ideal_z)).first()
-            )
-
-            if match:
-                excluded_ids.add(match.id)
-                match_z = [float(x) for x in match.z_vector]
-                rolling_seq = (rolling_seq + [match_z])[-5:]
-
-                dist_to_ideal = float(np.linalg.norm(np.array(match_z) - np.array(ideal_z)))
-                generated_tracks.append({
-                    "step": step_idx + 1,
-                    "track_id": match.id,
-                    "track_name": match.track_name or f"Track {match.id[:8]}",
-                    "artist_name": match.artists or "Spotify Artist",
-                    "target_energy": round(target_e_val, 3),
-                    "actual_energy": round(float(match.energy), 3),
-                    "vector_distance": round(dist_to_ideal, 4),
-                    "z_vector": match_z,
-                })
-
-        return {
-            "seed_count": seed_count,
-            "energy_curve": energy_targets,
-            "tracks": generated_tracks,
-            "playlist": generated_tracks,
-            "total_tracks": len(generated_tracks),
-        }
+        return generate_playlist_core(payload, db)
     except HTTPException:
         raise
     except Exception as e:
@@ -425,63 +441,83 @@ class PromptPlaylistRequest(BaseModel):
     track_count: int = Field(default=10, ge=5, le=25)
     seed_track_ids: Optional[List[str]] = Field(default=[])
 
+
 @app.post("/generate_from_prompt")
 async def generate_from_prompt(payload: PromptPlaylistRequest, db: Session = Depends(database.get_db)):
-    # 1. If user selected seed songs in UI, load their actual 7D acoustic telemetry from PostgreSQL
-    input_songs_metadata = []
-    selected_rows = []
-    if payload.seed_track_ids:
-        selected_rows = db.query(models.TrackFeature).filter(
-            models.TrackFeature.track_id.in_(payload.seed_track_ids)
-        ).all()
-        for r in selected_rows:
-            c_num, c_let = get_camelot(r.key, r.mode)
-            input_songs_metadata.append({
-                "track_id": r.track_id,
-                "track_name": getattr(r, "track_name", r.track_id[:8]),
-                "artist_name": getattr(r, "artist_name", "Unknown"),
-                "energy": round(float(r.energy), 3),
-                "valence": round(float(r.valence), 3),
-                "tempo": round(float(r.tempo), 1),
-                "camelot": f"{c_num}{c_let}",
-            })
-
-    # 2. Ask Ollama (with full seed telemetry) to plan the trajectory
-    plan = await plan_playlist_from_prompt(
-        prompt=payload.prompt,
-        track_count=payload.track_count,
-        input_songs=input_songs_metadata,
-    )
-
-    # 3. Prioritize user's explicitly selected track_ids first, then fill remaining slots with Ollama's suggestions
-    matched_seeds = [r.track_id for r in selected_rows]
-    for q in plan.seed_queries:
-        if len(matched_seeds) >= 5:
-            break
-        match = db.query(models.TrackFeature).filter(
-            or_(
-                models.TrackFeature.track_name.ilike(f"%{q}%"),
-                models.TrackFeature.artist_name.ilike(f"%{q}%"),
+    try:
+        # 1. If user selected seed songs in UI, load their actual 7D acoustic telemetry from PostgreSQL
+        input_songs_metadata = []
+        selected_rows = []
+        clean_seeds = [tid for tid in (payload.seed_track_ids or []) if tid]
+        if clean_seeds:
+            selected_rows = (
+                db.query(models.TrackFeature)
+                .filter(models.TrackFeature.id.in_(clean_seeds))
+                .all()
             )
-        ).first()
-        if match and match.track_id not in matched_seeds:
-            matched_seeds.append(match.track_id)
+            for r in selected_rows:
+                c_num, c_let = get_camelot(r.key, r.mode)
+                input_songs_metadata.append({
+                    "track_id": r.id,
+                    "track_name": r.track_name or r.id[:8],
+                    "artist_name": r.artists or "Unknown Artist",
+                    "energy": round(float(r.energy), 3) if r.energy is not None else 0.5,
+                    "valence": round(float(r.valence), 3) if r.valence is not None else 0.5,
+                    "tempo": round(float(r.tempo), 1) if r.tempo is not None else 120.0,
+                    "camelot": f"{c_num}{c_let}",
+                })
 
-    # 4. Run the PyTorch LSTM + Camelot Harmonic pgvector search
-    req = PlaylistRequest(
-        seed_track_ids=matched_seeds[:5],
-        custom_energy_curve=plan.energy_curve,
-        track_count=len(plan.energy_curve),
-        curve_type="custom",
-    )
-    result = generate_playlist_core(req, db)
+        # 2. Ask Ollama (with full seed telemetry) to plan the trajectory
+        plan = await plan_playlist_from_prompt(
+            prompt=payload.prompt,
+            track_count=payload.track_count,
+            input_songs=input_songs_metadata,
+        )
 
-    return {
-        "title": plan.playlist_title,
-        "vibe_summary": plan.vibe_summary,
-        "target_valence": plan.target_valence,
-        "recommended_bpm_range": plan.recommended_bpm_range,
-        "suggested_seeds": plan.seed_queries,
-        "energy_curve": plan.energy_curve,
-        "tracks": result["tracks"],
-    }
+        # 3. Prioritize user's explicitly selected track_ids first, then fill remaining slots with Ollama's suggestions
+        matched_seeds = [r.id for r in selected_rows]
+        for q in plan.seed_queries:
+            if len(matched_seeds) >= 5:
+                break
+            match = (
+                db.query(models.TrackFeature)
+                .filter(
+                    or_(
+                        models.TrackFeature.track_name.ilike(f"%{q}%"),
+                        models.TrackFeature.artists.ilike(f"%{q}%"),
+                        models.TrackFeature.id.ilike(f"%{q}%"),
+                    )
+                )
+                .first()
+            )
+            if match and match.id not in matched_seeds:
+                matched_seeds.append(match.id)
+
+        # 4. Run the PyTorch LSTM + 7D pgvector search
+        req = PlaylistRequest(
+            seed_track_ids=matched_seeds[:5],
+            custom_energy_curve=plan.energy_curve,
+            energy_curve=plan.energy_curve,
+            track_count=len(plan.energy_curve),
+            curve_type="custom",
+        )
+        result = generate_playlist_core(req, db)
+
+        tracks = result.get("tracks", [])
+        return {
+            "success": True,
+            "title": plan.playlist_title,
+            "playlist_title": plan.playlist_title,
+            "vibe_summary": plan.vibe_summary,
+            "target_valence": plan.target_valence,
+            "recommended_bpm_range": plan.recommended_bpm_range,
+            "suggested_seeds": plan.seed_queries,
+            "energy_curve": plan.energy_curve,
+            "tracks": tracks,
+            "playlist": tracks,
+            "total_tracks": len(tracks),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -529,6 +529,101 @@ const generatePlaylistPreview = async (req, res) => {
 router.post('/generate-playlist', generatePlaylistPreview);
 router.post('/export-playlist', exportPlaylist);
 
+const generatePromptPlaylist = async (req, res) => {
+  try {
+    const {
+      prompt,
+      track_count: trackCount = 10,
+      seed_track_ids: seedTrackIds = [],
+      access_token: accessToken,
+      export_to_spotify: exportToSpotify = false,
+      playlist_name: customPlaylistName,
+    } = req.body || {};
+
+    if (!prompt || typeof prompt !== 'string' || prompt.trim().length < 2) {
+      return res.status(400).json({ error: 'prompt is required and must be at least 2 characters.' });
+    }
+
+    const mlData = await mlFetch('/generate_from_prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: prompt.trim(),
+        track_count: Number(trackCount) || 10,
+        seed_track_ids: Array.isArray(seedTrackIds) ? seedTrackIds : [],
+      }),
+    });
+
+    const tracks = mlData.tracks || mlData.playlist || [];
+    const title = customPlaylistName || mlData.title || mlData.playlist_title || `Arc-Stream: ${prompt.slice(0, 24).trim()}`;
+    const energyCurve = mlData.energy_curve || [];
+
+    if (!exportToSpotify) {
+      return res.status(200).json({
+        success: true,
+        preview: true,
+        title,
+        playlist_title: title,
+        vibe_summary: mlData.vibe_summary || '',
+        target_valence: mlData.target_valence ?? 0.5,
+        recommended_bpm_range: mlData.recommended_bpm_range || [100, 128],
+        suggested_seeds: mlData.suggested_seeds || [],
+        energy_curve: energyCurve,
+        track_count: tracks.length,
+        tracks,
+        playlist: tracks,
+      });
+    }
+
+    try {
+      const exportResult = await exportTracksToSpotify(req, res, {
+        accessToken,
+        tracks,
+        playlistName: title,
+        resolvedCurve: energyCurve,
+      });
+
+      return res.status(200).json({
+        success: true,
+        ...exportResult,
+        title,
+        playlist_title: title,
+        vibe_summary: mlData.vibe_summary || '',
+        target_valence: mlData.target_valence ?? 0.5,
+        recommended_bpm_range: mlData.recommended_bpm_range || [100, 128],
+        suggested_seeds: mlData.suggested_seeds || [],
+        energy_curve: energyCurve,
+        track_count: tracks.length,
+        tracks,
+        playlist: tracks,
+      });
+    } catch (spErr) {
+      console.warn('[Prompt Playlist] Spotify export failed, returning generated tracks anyway:', spErr.message);
+      return res.status(200).json({
+        success: true,
+        exported: false,
+        export_error: spErr.message,
+        title,
+        playlist_title: title,
+        vibe_summary: mlData.vibe_summary || '',
+        target_valence: mlData.target_valence ?? 0.5,
+        recommended_bpm_range: mlData.recommended_bpm_range || [100, 128],
+        suggested_seeds: mlData.suggested_seeds || [],
+        energy_curve: energyCurve,
+        track_count: tracks.length,
+        tracks,
+        playlist: tracks,
+      });
+    }
+  } catch (error) {
+    console.error('[Prompt Playlist] Error:', error.message);
+    return res.status(502).json({ error: error.message });
+  }
+};
+
+router.post('/prompt-playlist', generatePromptPlaylist);
+router.post('/generate-from-prompt', generatePromptPlaylist);
+
 router.post('/queue-preview', async (req, res) => {
   const {
     seed_track_ids: seedTrackIds,
