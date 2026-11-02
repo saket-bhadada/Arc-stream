@@ -419,7 +419,7 @@ const LlmPromptGenerator = ({
         <div style={s.block}>
           <div style={s.sectionHeader}>
             <span style={s.blockLabel}>1. Describe your vibe or narrative</span>
-            <span style={s.pillModel}>Ollama · Qwen2.5 / Adaptive AI</span>
+            <span style={s.pillModel}>Groq · LLaMA 3.3 / Adaptive AI</span>
           </div>
 
           <textarea

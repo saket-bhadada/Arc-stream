@@ -29,6 +29,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-arc_stream}
       CSV_PATH: /data/tracks_features.csv
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
     ports:
       - "8000:8000"
     volumes:
@@ -53,6 +55,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-arc_stream}
       CSV_PATH: /data/tracks_features.csv
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
     volumes:
       - ./ml-service/training/archive/tracks_features.csv:/data/tracks_features.csv:ro
     depends_on:

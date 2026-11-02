@@ -26,7 +26,7 @@ import numpy as np
 from . import models, database
 from .inference import load_inference_model, predict_next_z_vector, predict_anchored_z_vector
 from .trajectory import generate_energy_curve
-from app.prompt.ollama_planner import plan_playlist_from_prompt
+from app.prompt.groq_planner import plan_playlist_from_prompt
 
 load_dotenv()
 
@@ -467,14 +467,14 @@ async def generate_from_prompt(payload: PromptPlaylistRequest, db: Session = Dep
                     "camelot": f"{c_num}{c_let}",
                 })
 
-        # 2. Ask Ollama (with full seed telemetry) to plan the trajectory
+        # 2. Ask Groq AI (with full seed telemetry) to plan the trajectory
         plan = await plan_playlist_from_prompt(
             prompt=payload.prompt,
             track_count=payload.track_count,
             input_songs=input_songs_metadata,
         )
 
-        # 3. Prioritize user's explicitly selected track_ids first, then fill remaining slots with Ollama's suggestions
+        # 3. Prioritize user's explicitly selected track_ids first, then fill remaining slots with Groq's suggestions
         matched_seeds = [r.id for r in selected_rows]
         for q in plan.seed_queries:
             if len(matched_seeds) >= 5:
