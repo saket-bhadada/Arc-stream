@@ -247,7 +247,7 @@ Arc-stream/
 │   │   ├── archive/
 │   │   │   └── tracks_features.csv # Spotify tracks feature dataset
 │   │   └── data_miner.py           # Training extraction pipeline
-│   ├── Dockerfile                  # ML service container definition
+│   ├── DockerFile                  # ML service container definition (case-sensitive path)
 │   └── requirements.txt            # Python dependencies
 ├── server/
 │   ├── server.js                   # Express application entry point
@@ -285,11 +285,12 @@ You can run Arc-Stream either using **Docker Compose** (recommended: sets up dat
 ### Prerequisites
 
 - **Git** installed on your system.
-- **Docker & Docker Compose** (for Containerized setup).
-- **Node.js 18+** & **npm** (for manual setup).
-- **Python 3.10+** (for manual setup).
+- **Docker Desktop with Docker Compose v2** (recommended setup).
+- **Node.js 20+** & **npm** (for manual setup).
+- **Python 3.11+** (for manual setup).
 - **PostgreSQL 16** with the [`pgvector`](https://github.com/pgvector/pgvector) extension installed (for manual setup).
 - A free **Spotify Developer Account** ([developer.spotify.com](https://developer.spotify.com)).
+- The `ml-service/training/archive/tracks_features.csv` dataset. It is not included in Git; supply the file before starting Compose or running the seeder.
 
 ---
 
@@ -300,7 +301,7 @@ To connect Arc-Stream to Spotify:
 2. Click **Create App**.
 3. Fill in the App details:
    - **App Name**: `Arc-Stream`
-   - **Redirect URI**: `http://127.0.0.1:3000/callback` (or `http://localhost:3000/callback`)
+   - **Redirect URI**: `http://127.0.0.1:3000/callback`
    - **APIs Used**: Select **Web API** and **Web Playback SDK**.
 4. Save the app and note down your **Client ID** and **Client Secret**.
 
@@ -308,7 +309,7 @@ To connect Arc-Stream to Spotify:
 
 ### Method 1: Docker Compose (Recommended)
 
-Docker Compose configures PostgreSQL with `pgvector`, populates the dataset automatically on first boot, runs the FastAPI PyTorch service, the Express server, and the React frontend.
+Docker Compose starts PostgreSQL with `pgvector`, a dataset seeder, the FastAPI ML service, the Express gateway, and the React frontend. The dataset file is ignored by Git and must be present at `ml-service/training/archive/tracks_features.csv` before startup.
 
 1. **Clone the repository:**
    ```bash
@@ -317,32 +318,40 @@ Docker Compose configures PostgreSQL with `pgvector`, populates the dataset auto
    ```
 
 2. **Configure environment variables:**
-   Create or edit `server/.env`:
+   Copy the root example to `.env` and edit it (PowerShell: `Copy-Item .env.example .env`):
    ```ini
-   PORT=3000
+   POSTGRES_USER=postgres
+   POSTGRES_PASSWORD=change-me-local-only
+   POSTGRES_DB=arc_stream
+
    SPOTIFY_CLIENT_ID=your_spotify_client_id_here
    SPOTIFY_CLIENT_SECRET=your_spotify_client_secret_here
    SPOTIFY_REDIRECT_URI=http://127.0.0.1:3000/callback
-   FRONTEND_URL=http://localhost:5173
+   FRONTEND_URL=http://127.0.0.1:5173
+   VITE_NODE_BASE=http://127.0.0.1:3000
 
-   DB_USER=postgres
-   DB_PASSWORD=postgres
-   DB_HOST=db
-   DB_PORT=5432
-   DB_DATABASE=arc_stream
-   DATABASE_URL=postgresql://postgres:postgres@db:5432/arc_stream
+   # Optional: enables Groq-backed natural-language mix planning
+   GROQ_API_KEY=
+   GROQ_MODEL=llama-3.3-70b-versatile
    ```
+   Register the redirect URI exactly as shown in the Spotify Developer Dashboard. Keep the frontend URL, Spotify redirect host, and API base host consistent (`127.0.0.1`) so the Spotify refresh cookie works. Never put Spotify secrets or the Groq key in a `VITE_` variable; Vite values are public in the built client.
+
+   The example PostgreSQL password is for local development only. Change it before exposing the database beyond your machine. If your password contains URL-reserved characters, use a percent-encoded password in the Compose-generated `DATABASE_URL` values.
 
 3. **Start the containers:**
    ```bash
    docker compose up --build
    ```
 
+   To stop the services while retaining database data, run `docker compose down`. To remove the database volume as well, use `docker compose down -v`.
+
 4. **Verify the services:**
-   - 🌐 **Client UI**: [http://localhost:5173](http://localhost:5173)
-   - ⚡ **Express Gateway**: [http://localhost:3000](http://localhost:3000)
-   - 🤖 **FastAPI ML Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-   - 🗄️ **PostgreSQL + pgvector**: `localhost:5432`
+   - 🌐 **Client UI**: [http://127.0.0.1:5173](http://127.0.0.1:5173)
+   - ⚡ **Express Gateway**: [http://127.0.0.1:3000](http://127.0.0.1:3000)
+   - 🤖 **FastAPI ML Docs**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+   - 🗄️ **PostgreSQL + pgvector**: `127.0.0.1:5432`
+
+Compose builds the ML service from `ml-service/DockerFile`, the server from `server/Dockerfile`, and the frontend from `client/Dockerfile`. The root `Dockerfile` is multi-stage and its `ml-service` target is used for the database seeder. `.dockerignore` files keep local environments, dependencies, and the dataset out of build contexts; the dataset is mounted read-only at runtime.
 
 ---
 
@@ -387,46 +396,66 @@ From the `ml-service` directory with your virtual environment activated:
 ```bash
 cd ml-service
 
-# Create or verify ml-service/.env:
+# Create or verify ml-service/.env with DATABASE_URL and CSV_PATH configured:
 # DATABASE_URL=postgresql://postgres:your_password@localhost:5432/arc_stream
 
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-Check health: [http://localhost:8000/](http://localhost:8000/)
+Check health: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
 
 #### 4. Run the Express Gateway
 In a new terminal window:
 ```bash
 cd server
-npm install
+npm ci
 
-# Ensure server/.env has your Spotify credentials and database connection details
+# Ensure server/.env has Spotify credentials and DB settings (DB_HOST=localhost)
 npm run dev
 ```
-The server will start on [http://localhost:3000](http://localhost:3000).
+The server will start on [http://127.0.0.1:3000](http://127.0.0.1:3000).
+For manual setup, set `FRONTEND_URL=http://127.0.0.1:5173` in `server/.env` and keep the Spotify redirect URI at `http://127.0.0.1:3000/callback`.
 
 #### 5. Run the Client (React + Vite)
 In a new terminal window:
 ```bash
 cd client
-npm install
+npm ci
 npm run dev
 ```
-Open [http://localhost:5173](http://localhost:5173) in your browser.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in your browser.
 
 #### 6. (Optional) Configure Groq API for Natural Language DJ Mix Planning
 To enable fast, cloud-based prompt-driven playlist planning (e.g. *"Cyberpunk night drive"*):
 1. Sign up for a free account at [console.groq.com](https://console.groq.com) and create an API key at [console.groq.com/keys](https://console.groq.com/keys).
-2. Add the key to `ml-service/.env` (or project root `.env`):
+2. Add the key to `ml-service/.env`:
    ```ini
    GROQ_API_KEY=gsk_your_actual_key_here
    GROQ_MODEL=llama-3.3-70b-versatile
    ```
-   *(If omitted, Arc-Stream will automatically use its internal deterministic heuristic trajectory generator instead of failing).*
+   *(For Docker Compose, set the key in the project-root `.env` instead. It is passed only to the ML service. If omitted, prompt planning uses its deterministic heuristic fallback.)*
 
 ---
 
 ## ⚙️ Configuration & Environment Variables
+
+### Docker Compose: project-root `.env`
+Copy `.env.example` to `.env`. Compose reads this file to configure PostgreSQL and passes only the values each container needs.
+
+| Variable | Description | Default / Example |
+|---|---|---|
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | PostgreSQL account and database | `postgres`, local-only password, `arc_stream` |
+| `DB_EXPOSE_PORT` | Host port for PostgreSQL | `5432` |
+| `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | Spotify app credentials; required for login/playback | From Spotify Developer Dashboard |
+| `SPOTIFY_REDIRECT_URI` | OAuth callback; must match the dashboard | `http://127.0.0.1:3000/callback` |
+| `FRONTEND_URL` | Browser-visible client URL and OAuth return URL | `http://127.0.0.1:5173` |
+| `VITE_NODE_BASE` | Browser-visible Express API URL, compiled into the client image | `http://127.0.0.1:3000` |
+| `GROQ_API_KEY` | Optional Groq Cloud API key for prompt-driven mix planning | *(Empty by default; heuristic fallback is used)* |
+| `GROQ_MODEL` | Groq model identifier | `llama-3.3-70b-versatile` |
+| `GROQ_API_URL` | Groq-compatible chat completions endpoint | `https://api.groq.com/openai/v1/chat/completions` |
+| `NODE_ENV` | Express cookie behavior; use `development` for local HTTP | `development` |
+| `KEEP_ALIVE_INTERVAL_HOURS` | Hours between in-process keep-alive checks | `48` |
+
+Spotify credentials are injected only into the server container; the Groq key is injected only into the ML service. Never put secrets in `client/.env` or use a `VITE_` prefix, because Vite embeds those values in the public frontend bundle.
 
 ### `server/.env`
 | Variable | Description | Default / Example |
@@ -435,9 +464,19 @@ To enable fast, cloud-based prompt-driven playlist planning (e.g. *"Cyberpunk ni
 | `SPOTIFY_CLIENT_ID` | Spotify App Client ID from developer portal | *(Required)* |
 | `SPOTIFY_CLIENT_SECRET` | Spotify App Client Secret | *(Required)* |
 | `SPOTIFY_REDIRECT_URI` | Spotify OAuth Callback URI | `http://127.0.0.1:3000/callback` |
-| `FRONTEND_URL` | Base URL of the React Vite application | `http://localhost:5173` |
+| `FRONTEND_URL` | Base URL of the React Vite application | `http://127.0.0.1:5173` |
 | `ML_SERVICE_URL` | Address of the FastAPI ML microservice | `http://localhost:8000` |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_DATABASE` | PostgreSQL connection settings | `localhost`, `5432`, `postgres`, configured password, `arc_stream` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://postgres:password@localhost:5432/arc_stream` |
+| `APP_URL` | Public server URL for the keep-alive `/health` ping; `RENDER_EXTERNAL_URL` is detected automatically | *(Optional)* |
+| `KEEP_ALIVE_INTERVAL_HOURS` | Hours between keep-alive pings; the first runs when the server starts | `48` |
+
+The keep-alive scheduler pings the database, ML service, and—when `APP_URL` or
+`RENDER_EXTERNAL_URL` is set—the server's `/health` endpoint. A scheduler running
+inside the server cannot wake a host that has already suspended or stopped it.
+For hosts that sleep during inactivity, configure an external uptime monitor or
+scheduled job to request the public `/health` URL more frequently than the
+host's sleep timeout.
 
 ### `ml-service/.env`
 | Variable | Description | Default / Example |
@@ -446,11 +485,12 @@ To enable fast, cloud-based prompt-driven playlist planning (e.g. *"Cyberpunk ni
 | `CSV_PATH` | Path to `tracks_features.csv` dataset | `./training/archive/tracks_features.csv` |
 | `GROQ_API_KEY` | Groq Cloud API key from console.groq.com/keys | *(Optional - has heuristic fallback)* |
 | `GROQ_MODEL` | Groq model identifier | `llama-3.3-70b-versatile` |
+| `GROQ_API_URL` | Groq-compatible chat completions endpoint | `https://api.groq.com/openai/v1/chat/completions` |
 
 ### `client/.env`
 | Variable | Description | Default / Example |
 |---|---|---|
-| `VITE_NODE_BASE` | Express backend base URL | `http://127.0.0.1:3000` |
+| `VITE_NODE_BASE` | Express backend base URL; public and embedded at build time | `http://127.0.0.1:3000` |
 
 ---
 

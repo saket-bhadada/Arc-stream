@@ -1,12 +1,16 @@
 .git/
 .idea/
 .vscode/
+**/.env
+**/.env.*
 **/node_modules/
 **/__pycache__/
 **/*.pyc
+**/*.pyo
 **/.venv/
 **/venv/
 **/dist/
+**/*.log
 **/server_output.log
 ml-service/training/archive/*.csv
 *.ipynb

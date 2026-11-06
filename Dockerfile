@@ -34,7 +34,7 @@ FROM node:20-alpine AS server
 WORKDIR /app
 
 COPY server/package*.json ./
-RUN npm ci --omit=dev || npm install --omit=dev
+RUN npm ci --omit=dev
 
 COPY server/ ./
 COPY database/ ./database/
@@ -50,7 +50,7 @@ FROM node:20-alpine AS client-build
 WORKDIR /app
 
 COPY client/package*.json ./
-RUN npm ci || npm install
+RUN npm ci
 
 COPY client/ ./
 

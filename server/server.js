@@ -8,6 +8,7 @@ dotenv.config();
 import dashboardRoutes from './components/DashboardRoutes.js';
 import loginRoutes from './components/loginRoutes.js';
 import db, { databaseReady } from './db.js';
+import { startKeepAliveScheduler } from './keepalive.js';
 
 const app = express();
 const frontendUrl = new URL(process.env.FRONTEND_URL || 'http://localhost:5173');
@@ -62,6 +63,7 @@ try {
   await databaseReady;
   app.listen(port, () => {
     console.log(`[Arc-Stream] Server: http://localhost:${port}`);
+    startKeepAliveScheduler();
   });
 } catch (error) {
   console.error('[Server] Startup failed:', error.message);

@@ -23,7 +23,7 @@ services:
   ml-service:
     build:
       context: ./ml-service
-      dockerfile: Dockerfile
+      dockerfile: DockerFile
     container_name: arc-stream-ml
     restart: unless-stopped
     environment:
@@ -31,6 +31,7 @@ services:
       CSV_PATH: /data/tracks_features.csv
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_API_URL: ${GROQ_API_URL:-https://api.groq.com/openai/v1/chat/completions}
     ports:
       - "8000:8000"
     volumes:
@@ -55,8 +56,6 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-arc_stream}
       CSV_PATH: /data/tracks_features.csv
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
     volumes:
       - ./ml-service/training/archive/tracks_features.csv:/data/tracks_features.csv:ro
     depends_on:
@@ -71,11 +70,11 @@ services:
       dockerfile: Dockerfile
     container_name: arc-stream-server
     restart: unless-stopped
-    env_file:
-      - ./server/.env
     environment:
       PORT: 3000
-      NODE_ENV: development
+      NODE_ENV: ${NODE_ENV:-development}
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
       FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1:5173}
       SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:3000/callback}
       ML_SERVICE_URL: http://ml-service:8000
@@ -86,6 +85,7 @@ services:
       DB_DATABASE: ${POSTGRES_DB:-arc_stream}
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-arc_stream}
       SCHEMA_PATH: /app/database/database_schema.sql
+      KEEP_ALIVE_INTERVAL_HOURS: ${KEEP_ALIVE_INTERVAL_HOURS:-48}
     ports:
       - "3000:3000"
     volumes:
