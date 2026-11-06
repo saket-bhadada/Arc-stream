@@ -313,7 +313,7 @@ Docker Compose starts PostgreSQL with `pgvector`, a dataset seeder, the FastAPI 
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/your-username/Arc-stream.git
+   git clone https://github.com/saket-bhadada/Arc-stream.git
    cd Arc-stream
    ```
 
@@ -336,7 +336,7 @@ Docker Compose starts PostgreSQL with `pgvector`, a dataset seeder, the FastAPI 
    ```
    Register the redirect URI exactly as shown in the Spotify Developer Dashboard. Keep the frontend URL, Spotify redirect host, and API base host consistent (`127.0.0.1`) so the Spotify refresh cookie works. Never put Spotify secrets or the Groq key in a `VITE_` variable; Vite values are public in the built client.
 
-   The example PostgreSQL password is for local development only. Change it before exposing the database beyond your machine. If your password contains URL-reserved characters, use a percent-encoded password in the Compose-generated `DATABASE_URL` values.
+   The example PostgreSQL password is for local development only. Change it before exposing the database beyond your machine. Compose inserts this password into a PostgreSQL URL, so use a URL-safe value without reserved characters.
 
 3. **Start the containers:**
    ```bash
