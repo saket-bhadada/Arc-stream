@@ -22,7 +22,10 @@ class ArcStreamDB:
             raise RuntimeError(
                 '[Arc-StreamDB] Database_url is not set in ml_service/app'
             )
-        self.dsn = dsn.replace("postgresql+psycopg2://", "postgresql://", 1)
+        normalized_dsn = dsn.replace("postgresql+psycopg2://", "postgresql://", 1)
+        if normalized_dsn.startswith("postgres://"):
+            normalized_dsn = normalized_dsn.replace("postgres://", "postgresql://", 1)
+        self.dsn = normalized_dsn
         self.pool: Optional[asyncpg.Pool] = None
 
     async def connect(self):

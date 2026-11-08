@@ -120,6 +120,17 @@ def main() -> None:
     dataframe = dataframe.dropna(subset=REQUIRED_COLUMNS).drop_duplicates(subset=ID_COL)
     print(f"[Populate] {before_count:,} rows -> {len(dataframe):,} after dedup/null drop.")
 
+    limit = None
+    for idx, arg in enumerate(sys.argv):
+        if arg == "--limit" and idx + 1 < len(sys.argv):
+            limit = int(sys.argv[idx + 1])
+        elif arg.startswith("--limit="):
+            limit = int(arg.split("=", 1)[1])
+
+    if limit is not None:
+        dataframe = dataframe.iloc[:limit]
+        print(f"[Populate] Limiting to first {limit:,} tracks for insertion.")
+
     print("[Populate] Normalizing real audio features into z_vector ...")
     dataframe["z_vector_str"] = dataframe.apply(
         lambda row: "[" + ",".join(str(value) for value in normalize_row(row)) + "]",

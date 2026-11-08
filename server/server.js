@@ -11,17 +11,29 @@ import db, { databaseReady } from './db.js';
 import { startKeepAliveScheduler } from './keepalive.js';
 
 const app = express();
-const frontendUrl = new URL(process.env.FRONTEND_URL || 'http://localhost:5173');
-const allowedOrigins = new Set([frontendUrl.origin]);
+app.set('trust proxy', 1);
 
-if (frontendUrl.hostname === 'localhost') {
-  const loopbackUrl = new URL(frontendUrl);
-  loopbackUrl.hostname = '127.0.0.1';
-  allowedOrigins.add(loopbackUrl.origin);
-} else if (frontendUrl.hostname === '127.0.0.1') {
-  const localhostUrl = new URL(frontendUrl);
-  localhostUrl.hostname = 'localhost';
-  allowedOrigins.add(localhostUrl.origin);
+const frontendEnv = process.env.FRONTEND_URL || 'http://localhost:5173';
+const allowedOrigins = new Set();
+
+for (const rawUrl of frontendEnv.split(',')) {
+  const trimmed = rawUrl.trim().replace(/\/+$/, '');
+  if (!trimmed) continue;
+  try {
+    const parsed = new URL(trimmed);
+    allowedOrigins.add(parsed.origin);
+    if (parsed.hostname === 'localhost') {
+      const loopbackUrl = new URL(trimmed);
+      loopbackUrl.hostname = '127.0.0.1';
+      allowedOrigins.add(loopbackUrl.origin);
+    } else if (parsed.hostname === '127.0.0.1') {
+      const localhostUrl = new URL(trimmed);
+      localhostUrl.hostname = 'localhost';
+      allowedOrigins.add(localhostUrl.origin);
+    }
+  } catch (err) {
+    console.warn(`[Server] Invalid URL in FRONTEND_URL: ${trimmed}`);
+  }
 }
 
 app.use(cors({

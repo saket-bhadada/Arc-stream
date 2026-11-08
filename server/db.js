@@ -7,24 +7,49 @@ import pg from 'pg';
 
 dotenv.config();
 
-const databaseName = process.env.DB_DATABASE || process.env.DB_NAME;
-const required = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD'];
-const missing = required.filter((key) => !process.env[key]);
-if (!databaseName) missing.push('DB_DATABASE or DB_NAME');
-if (missing.length) {
-  throw new Error(`[DB] Missing environment variables: ${missing.join(', ')}`);
+const databaseUrl = process.env.DATABASE_URL;
+let poolConfig;
+
+if (databaseUrl) {
+  // Normalize postgres:// to postgresql:// if provided
+  const normalizedUrl = databaseUrl.startsWith('postgres://')
+    ? databaseUrl.replace(/^postgres:\/\//, 'postgresql://')
+    : databaseUrl;
+
+  const isLocal = normalizedUrl.includes('localhost') || normalizedUrl.includes('127.0.0.1') || normalizedUrl.includes('@db:');
+  const needsSsl = process.env.DB_SSL === 'true' || (process.env.NODE_ENV === 'production' && !isLocal);
+
+  poolConfig = {
+    connectionString: normalizedUrl,
+    ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+  };
+} else {
+  const databaseName = process.env.DB_DATABASE || process.env.DB_NAME;
+  const required = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD'];
+  const missing = required.filter((key) => !process.env[key]);
+  if (!databaseName) missing.push('DB_DATABASE or DB_NAME');
+  if (missing.length) {
+    throw new Error(`[DB] Missing environment variables: ${missing.join(', ')}`);
+  }
+
+  const isLocal = ['localhost', '127.0.0.1', 'db'].includes(process.env.DB_HOST);
+  const needsSsl = process.env.DB_SSL === 'true' || (process.env.NODE_ENV === 'production' && !isLocal);
+
+  poolConfig = {
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT),
+    database: databaseName,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+  };
 }
 
-const db = new pg.Pool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT),
-  database: databaseName,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  max: Number.parseInt(process.env.DB_MAX_CONNECTIONS, 10) || 10,
-  idleTimeoutMillis: Number.parseInt(process.env.DB_IDLE_TIMEOUT_MS, 10) || 30_000,
-  connectionTimeoutMillis: Number.parseInt(process.env.DB_CONNECTION_TIMEOUT_MS, 10) || 5_000,
-});
+poolConfig.max = Number.parseInt(process.env.DB_MAX_CONNECTIONS, 10) || 10;
+poolConfig.idleTimeoutMillis = Number.parseInt(process.env.DB_IDLE_TIMEOUT_MS, 10) || 30_000;
+poolConfig.connectionTimeoutMillis = Number.parseInt(process.env.DB_CONNECTION_TIMEOUT_MS, 10) || 10_000;
+
+const db = new pg.Pool(poolConfig);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const candidateSchemaPaths = [

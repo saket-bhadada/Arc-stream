@@ -1,0 +1,48 @@
+services:
+  # ─── 1. FastAPI + PyTorch + Groq ML Service ──────────────────────────────
+  - type: web
+    name: arc-stream-ml
+    runtime: docker
+    dockerfilePath: ml-service/DockerFile
+    dockerContext: ml-service
+    plan: starter
+    region: oregon
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_API_URL
+        value: https://api.groq.com/openai/v1/chat/completions
+
+  # ─── 2. Node.js Express Gateway & Spotify OAuth Server ────────────────────
+  - type: web
+    name: arc-stream-server
+    runtime: node
+    rootDir: server
+    buildCommand: npm ci --omit=dev
+    startCommand: node server.js
+    plan: starter
+    region: oregon
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: ML_SERVICE_URL
+        fromService:
+          type: web
+          name: arc-stream-ml
+          property: host
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      - key: SPOTIFY_REDIRECT_URI
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: KEEP_ALIVE_INTERVAL_HOURS
+        value: "48"

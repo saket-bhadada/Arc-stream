@@ -19,11 +19,11 @@ const REFRESH_COOKIE_NAME = 'arc_stream_token';
 const REFRESH_COOKIE_MAX_AGE = 90*24*60*60*1000;
 
 const cookieOption = () => ({
-    httpOnly:true,
-    secure:process.env.NODE_ENV==='production',
-    sameSite:'lax',
-    maxAge:REFRESH_COOKIE_MAX_AGE,
-    path:'/',
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    maxAge: REFRESH_COOKIE_MAX_AGE,
+    path: '/',
 });
 
 router.get('/login',(req,res)=>{
@@ -71,7 +71,7 @@ router.post('/refresh', async (req, res) => {
 });
 
 router.post('/logout',(req,res)=>{
-    res.clearCookie(REFRESH_COOKIE_NAME,{path:'/'});
+    res.clearCookie(REFRESH_COOKIE_NAME, cookieOption());
     res.json({success:true});
 });
 
