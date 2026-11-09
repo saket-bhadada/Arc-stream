@@ -6,24 +6,11 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 import numpy as np
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
-
-# Automatically load environment variables from ml-service/.env, project root .env, or server/.env
-_curr_dir = Path(__file__).resolve().parent
-for candidate in [
-    _curr_dir.parent.parent / ".env",                    # ml-service/.env
-    _curr_dir.parent.parent.parent / ".env",             # project root .env
-    _curr_dir.parent.parent.parent / "server" / ".env",  # server/.env
-]:
-    if candidate.exists():
-        load_dotenv(candidate)
-load_dotenv()
 
 logger = logging.getLogger("arc_stream.groq")
 

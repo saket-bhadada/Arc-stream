@@ -23,9 +23,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY ml-service/app /code/app
 COPY database /code/database
 
-EXPOSE 8000
+EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}"]
 
 
 # ─── Target 2: Node.js Express Gateway & Spotify Auth Server ─────────────────

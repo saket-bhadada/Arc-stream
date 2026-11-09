@@ -5,6 +5,8 @@ __pycache__/
 venv/
 env/
 .env
+.env.*
+.git/
 .vscode/
 training/archive/*.csv
 *.ipynb

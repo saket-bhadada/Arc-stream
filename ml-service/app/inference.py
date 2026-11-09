@@ -1,34 +1,71 @@
-import os
-import torch
-import numpy as np
-from typing import List, Optional
-from .model_arch import ArcStreamLSTM
-from .config import WEIGHTS_PATH, LATENT_DIM, CONDITIONED_INPUT_DIM
+from __future__ import annotations
 
+import logging
+import os
+import numpy as np
+import time
+from threading import Lock
+from typing import TYPE_CHECKING, List, Optional, Sequence
+
+from .config import CONDITIONED_INPUT_DIM, LATENT_DIM, WEIGHTS_PATH
+
+if TYPE_CHECKING:
+    from .model_arch import ArcStreamLSTM
+
+logger = logging.getLogger(__name__)
 _MODEL_INSTANCE: Optional[ArcStreamLSTM] = None
+_MODEL_LOCK = Lock()
+
 
 def load_inference_model() -> ArcStreamLSTM:
     global _MODEL_INSTANCE
     if _MODEL_INSTANCE is not None:
         return _MODEL_INSTANCE
 
-    model = ArcStreamLSTM(input_dim=CONDITIONED_INPUT_DIM, output_dim=LATENT_DIM)
-    if os.path.exists(WEIGHTS_PATH):
-        try:
-            state = torch.load(WEIGHTS_PATH, map_location=torch.device("cpu"))
-            model.load_state_dict(state)
-            print("Loaded trained ArcStream LSTM weights.")
-        except Exception as e:
-            print(f"Warning: Failed to load weights ({e}). Using baseline initialization.")
-    model.eval()
-    _MODEL_INSTANCE = model
+    with _MODEL_LOCK:
+        if _MODEL_INSTANCE is not None:
+            return _MODEL_INSTANCE
+
+        started_at = time.perf_counter()
+        import torch
+        from .model_arch import ArcStreamLSTM
+
+        torch.set_num_threads(1)
+        model = ArcStreamLSTM(input_dim=CONDITIONED_INPUT_DIM, output_dim=LATENT_DIM)
+        if os.path.exists(WEIGHTS_PATH):
+            try:
+                state = torch.load(
+                    WEIGHTS_PATH,
+                    map_location=torch.device("cpu"),
+                    weights_only=True,
+                )
+                model.load_state_dict(state)
+                logger.info("[Model] Loaded trained CPU weights.")
+            except Exception as error:
+                logger.warning(
+                    "[Model] Failed to load weights (%s); using baseline initialization.",
+                    type(error).__name__,
+                )
+        else:
+            logger.warning("[Model] Weights file not found; using baseline initialization.")
+
+        model.eval()
+        _MODEL_INSTANCE = model
+        logger.info("[Model] CPU model ready in %.2fs.", time.perf_counter() - started_at)
     return _MODEL_INSTANCE
 
+
+def is_model_loaded() -> bool:
+    return _MODEL_INSTANCE is not None
+
+
 def predict_next_z_vector(
-    history_vectors: List[List[float]],
+    history_vectors: Sequence[Sequence[float]],
     target_energy: float
 ) -> List[float]:
     model = load_inference_model()
+    import torch
+
     if not history_vectors:
         history_vectors = [[0.5] * LATENT_DIM]
 
@@ -47,12 +84,12 @@ def predict_next_z_vector(
     return [float(x) for x in predicted_vec]
 
 def load_model(weights_path=None) -> ArcStreamLSTM:
-    """Compatibility wrapper used by main.py's lifespan. Uses WEIGHTS_PATH from config."""
+    """Compatibility wrapper; configured weights load on the first inference."""
     return load_inference_model()
 
 def predict_next_latent_vector(
     model,
-    sequence_history: List[List[float]],
+    sequence_history: Sequence[Sequence[float]],
     target_energy: float
 ) -> List[float]:
     """Compatibility wrapper used by main.py endpoints."""

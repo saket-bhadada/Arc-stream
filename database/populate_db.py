@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from importlib import import_module
 from pathlib import Path
 from typing import Final
 
@@ -25,8 +26,8 @@ for candidate_dir in (ML_SERVICE_DIR, PROJECT_ROOT):
     if candidate_dir.exists() and str(candidate_dir) not in sys.path:
         sys.path.insert(0, str(candidate_dir))
 
-from app.config import FEATURE_COLS  # noqa: E402
-from app.feature_utils import normalize_row  # noqa: E402
+FEATURE_COLS = import_module("app.config").FEATURE_COLS
+normalize_row = import_module("app.feature_utils").normalize_row
 
 load_dotenv(PROJECT_ROOT / "server" / ".env")
 load_dotenv(PROJECT_ROOT / ".env")
@@ -101,7 +102,10 @@ def main() -> None:
                 raise SystemExit("[Populate] ERROR - pgvector extension not installed.")
 
             cursor.execute("SELECT COUNT(*) FROM track_features")
-            existing_count = cursor.fetchone()[0]
+            count_row = cursor.fetchone()
+            if count_row is None:
+                raise RuntimeError("COUNT query returned no result.")
+            existing_count = count_row[0]
             if existing_count > 0 and not force_seed:
                 print(f"[Populate] track_features already has {existing_count:,} rows. Skipping seed (use --force to re-run).")
                 return

@@ -5,8 +5,9 @@ services:
     runtime: docker
     dockerfilePath: ml-service/DockerFile
     dockerContext: ml-service
-    plan: starter
+    plan: free
     region: oregon
+    healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
         sync: false

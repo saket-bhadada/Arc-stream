@@ -2,53 +2,44 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from math import isfinite
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Literal, Sequence
+from math import isfinite
+from typing import List, Optional, Sequence
 
-from dotenv import load_dotenv
+import numpy as np
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import func, or_
+from sqlalchemy.orm import Session
 
 from app.config import LATENT_DIM, MAX_SEQ_LEN, MIN_SEQ_LEN
 from app.database_manager import ArcStreamDB
-from app.inference import load_model, predict_next_latent_vector
-
-from fastapi import FastAPI, HTTPException, Depends, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import or_, func
-from pydantic import BaseModel, Field
-from typing import List, Optional
-from contextlib import asynccontextmanager
-import numpy as np
+from app.inference import is_model_loaded, load_inference_model, predict_next_latent_vector
 
 from . import models, database
-from .inference import load_inference_model, predict_next_z_vector, predict_anchored_z_vector
+from .inference import predict_next_z_vector
 from .trajectory import generate_energy_curve
 from app.prompt.groq_planner import plan_playlist_from_prompt
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is required.")
-
 arc_db = ArcStreamDB(DATABASE_URL)
-WEIGHTS_PATH = Path(__file__).resolve().parent / "weights" / "arc_stream_lstm.pth"
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    await arc_db.connect()
-    application.state.model = load_model(WEIGHTS_PATH)
+    logger.info(
+        "[Startup] port=%s DATABASE_URL configured=%s",
+        os.getenv("PORT", "10000"),
+        bool(os.getenv("DATABASE_URL")),
+    )
+    logger.info("[Startup] Database pool and Torch model will initialize on demand.")
     try:
-        count = await arc_db.track_count()
-        print(f"[Startup] track_features: {count:,} rows.")
-        if count == 0:
-            print("[Startup] Database is empty. Run database/populate_db.py.")
-    finally:
         yield
+    finally:
         await arc_db.disconnect()
 
 
@@ -107,7 +98,7 @@ async def recommend_one(
     excluded_ids: Sequence[str],
 ) -> tuple[dict[str, object], list[float]]:
     prediction = predict_next_latent_vector(
-        model=app.state.model,
+        model=load_inference_model(),
         sequence_history=sequence,
         target_energy=target_energy,
     )
@@ -121,6 +112,11 @@ async def recommend_one(
         raise HTTPException(status_code=500, detail="Database returned an invalid track vector.")
     track["predicted_vector"] = prediction
     return track, [float(value) for value in selected_vector]
+
+
+@app.get("/health")
+async def health_endpoint() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.get("/")
@@ -137,7 +133,7 @@ async def health_check() -> dict[str, object]:
         "database": database_status,
         "track_features_rows": track_count,
         "vector_dimension": LATENT_DIM,
-        "model_loaded": app.state.model is not None,
+        "model_loaded": is_model_loaded(),
     }
 
 
@@ -358,7 +354,7 @@ async def predict_queue(payload: QueuePredictRequest) -> dict[str, object]:
 
     for step in range(payload.count):
         prediction = predict_next_latent_vector(
-            model=app.state.model,
+            model=load_inference_model(),
             sequence_history=window[-MIN_SEQ_LEN:],
             target_energy=payload.target_energy,
         )

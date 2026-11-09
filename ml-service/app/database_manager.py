@@ -1,10 +1,12 @@
-import os
-from typing import Optional, Sequence
-import asyncpg
-from dotenv import load_dotenv
-from fastapi import HTTPException
+import asyncio
+import logging
+from typing import Any, Optional, Sequence
 
-load_dotenv()
+import asyncpg
+from pgvector.asyncpg import register_vector
+from sqlalchemy.engine import make_url
+
+logger = logging.getLogger(__name__)
 
 
 def _as_pgvector(values: Sequence[float]) -> str:
@@ -16,37 +18,90 @@ def _parse_pgvector(value: str) -> list[float]:
     return [float(item) for item in value.strip("[]").split(",") if item]
 
 
-class ArcStreamDB:
-    def __init__(self, dsn: str):
-        if not dsn:
-            raise RuntimeError(
-                '[Arc-StreamDB] Database_url is not set in ml_service/app'
-            )
-        normalized_dsn = dsn.replace("postgresql+psycopg2://", "postgresql://", 1)
-        if normalized_dsn.startswith("postgres://"):
-            normalized_dsn = normalized_dsn.replace("postgres://", "postgresql://", 1)
-        self.dsn = normalized_dsn
-        self.pool: Optional[asyncpg.Pool] = None
+async def _register_pgvector(connection: asyncpg.Connection) -> None:
+    schema = await connection.fetchval(
+        """
+        SELECT ns.nspname
+        FROM pg_extension AS ext
+        JOIN pg_namespace AS ns ON ns.oid = ext.extnamespace
+        WHERE ext.extname = 'vector'
+        """
+    )
+    if not schema:
+        raise RuntimeError("pgvector is not installed; run CREATE EXTENSION vector.")
+    await register_vector(connection, schema=schema)
 
-    async def connect(self):
-        self.pool = await asyncpg.create_pool(
-            self.dsn,
-            min_size=2,
-            max_size=10,
-        )
-        print('[Arc-StreamDB] asyncpg pool connected')
+
+class ArcStreamDB:
+    def __init__(self, dsn: Optional[str]):
+        self.dsn = dsn
+        self.pool: Optional[asyncpg.Pool] = None
+        self._connect_lock = asyncio.Lock()
+
+    async def connect(self) -> None:
+        if self.pool is not None:
+            return
+
+        async with self._connect_lock:
+            if self.pool is not None:
+                return
+            if not self.dsn:
+                raise RuntimeError("DATABASE_URL environment variable is not set.")
+
+            url = make_url(self.dsn).set(drivername="postgresql")
+            query = dict(url.query)
+            ssl_mode = query.pop("sslmode", None)
+            explicit_ssl = query.pop("ssl", None)
+            if not ssl_mode:
+                ssl_mode = explicit_ssl
+            if url.host and url.host.endswith(".pooler.supabase.com"):
+                ssl_mode = ssl_mode or "require"
+            url = url.set(query=query)
+
+            if ssl_mode:
+                ssl_mode = str(ssl_mode).lower()
+            ssl_setting: Optional[str | bool]
+            if ssl_mode in ("require", "verify-ca", "verify-full"):
+                ssl_setting = ssl_mode
+            elif ssl_mode == "disable":
+                ssl_setting = False
+            else:
+                ssl_setting = None
+
+            pool_options: dict[str, Any] = {
+                "dsn": url.render_as_string(hide_password=False),
+                "min_size": 1,
+                "max_size": 2,
+                "statement_cache_size": 0,
+                "init": _register_pgvector,
+            }
+            if ssl_setting is not None:
+                pool_options["ssl"] = ssl_setting
+
+            try:
+                self.pool = await asyncpg.create_pool(**pool_options)
+            except Exception as error:
+                logger.warning(
+                    "[Database] Async pool connection failed (%s); a later request will retry.",
+                    type(error).__name__,
+                )
+                raise
+            logger.info(
+                "[Database] Async pool connected (Supabase pooler=%s).",
+                bool(url.host and url.host.endswith(".pooler.supabase.com")),
+            )
 
     async def disconnect(self):
         if self.pool:
             await self.pool.close()
             self.pool = None
-            print('[Arc-StreamDB] asyncpg pool closed')
+            logger.info("[Database] Async pool closed.")
 
-    def _require_pool(self) -> asyncpg.Pool:
+    async def _get_pool(self) -> asyncpg.Pool:
         if self.pool is None:
-            raise RuntimeError(
-                '[ArcStreamDB] Pool not initialised. Call connect() first.'
-            )
+            await self.connect()
+        if self.pool is None:
+            raise RuntimeError("Database pool could not be initialized.")
         return self.pool
 
     async def find_nearest_tracks(
@@ -71,7 +126,8 @@ class ArcStreamDB:
             ORDER BY z_vector <-> $1::vector
             LIMIT $3
         """
-        rows = await self._require_pool().fetch(
+        pool = await self._get_pool()
+        rows = await pool.fetch(
             query,
             _as_pgvector(predicted_vector),
             list(excluded_track_ids),
@@ -114,7 +170,8 @@ class ArcStreamDB:
             FROM track_features
             WHERE id = $1
         """
-        row = await self._require_pool().fetchrow(query, track_id)
+        pool = await self._get_pool()
+        row = await pool.fetchrow(query, track_id)
         if not row:
             return None
         return {
@@ -135,7 +192,8 @@ class ArcStreamDB:
             ORDER BY ABS(energy - $1), id
             LIMIT 1
         """
-        row = await self._require_pool().fetchrow(query, target_energy)
+        pool = await self._get_pool()
+        row = await pool.fetchrow(query, target_energy)
         return _parse_pgvector(row["z_vector"]) if row is not None else None
 
     async def get_track_z_vector(self, track_id: str) -> list[float] | None:
@@ -144,7 +202,8 @@ class ArcStreamDB:
             FROM   track_features
             WHERE  id = $1
         """
-        row = await self._require_pool().fetchrow(query, track_id)
+        pool = await self._get_pool()
+        row = await pool.fetchrow(query, track_id)
 
         if not row:
             return None
@@ -161,7 +220,8 @@ class ArcStreamDB:
             FROM   track_features
             WHERE  id = ANY($1::text[])
         """
-        rows = await self._require_pool().fetch(query, track_ids)
+        pool = await self._get_pool()
+        rows = await pool.fetch(query, track_ids)
 
         result = {}
         for row in rows:
@@ -171,9 +231,12 @@ class ArcStreamDB:
 
     async def ping(self) -> bool:
         try:
-            return await self._require_pool().fetchval('SELECT 1') == 1
-        except Exception:
+            pool = await self._get_pool()
+            return await pool.fetchval('SELECT 1') == 1
+        except Exception as error:
+            logger.warning("[Database] Ping failed (%s).", type(error).__name__)
             return False
 
     async def track_count(self) -> int:
-        return int(await self._require_pool().fetchval('SELECT COUNT(*) FROM track_features'))
+        pool = await self._get_pool()
+        return int(await pool.fetchval('SELECT COUNT(*) FROM track_features'))

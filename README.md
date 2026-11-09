@@ -396,7 +396,7 @@ From the `ml-service` directory with your virtual environment activated:
 ```bash
 cd ml-service
 
-# Create or verify ml-service/.env with DATABASE_URL and CSV_PATH configured:
+# Set DATABASE_URL in the process environment, for example:
 # DATABASE_URL=postgresql://postgres:your_password@localhost:5432/arc_stream
 
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -427,12 +427,9 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in your browser.
 #### 6. (Optional) Configure Groq API for Natural Language DJ Mix Planning
 To enable fast, cloud-based prompt-driven playlist planning (e.g. *"Cyberpunk night drive"*):
 1. Sign up for a free account at [console.groq.com](https://console.groq.com) and create an API key at [console.groq.com/keys](https://console.groq.com/keys).
-2. Add the key to `ml-service/.env`:
-   ```ini
-   GROQ_API_KEY=gsk_your_actual_key_here
-   GROQ_MODEL=llama-3.3-70b-versatile
-   ```
-   *(For Docker Compose, set the key in the project-root `.env` instead. It is passed only to the ML service. If omitted, prompt planning uses its deterministic heuristic fallback.)*
+2. Set `GROQ_API_KEY` in the process environment. For Docker Compose, set the
+   key in the project-root `.env`; it is passed only to the ML service. If
+   omitted, prompt planning uses its deterministic heuristic fallback.
 
 ---
 
@@ -478,7 +475,10 @@ For hosts that sleep during inactivity, configure an external uptime monitor or
 scheduled job to request the public `/health` URL more frequently than the
 host's sleep timeout.
 
-### `ml-service/.env`
+### ML service environment variables
+The API reads these values from its process environment; it does not load a
+service-local `.env` file.
+
 | Variable | Description | Default / Example |
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL connection string for SQLAlchemy / asyncpg | `postgresql://postgres:password@localhost:5432/arc_stream` |
@@ -486,6 +486,23 @@ host's sleep timeout.
 | `GROQ_API_KEY` | Groq Cloud API key from console.groq.com/keys | *(Optional - has heuristic fallback)* |
 | `GROQ_MODEL` | Groq model identifier | `llama-3.3-70b-versatile` |
 | `GROQ_API_URL` | Groq-compatible chat completions endpoint | `https://api.groq.com/openai/v1/chat/completions` |
+
+### Render: ML web service
+
+For a dashboard-created Docker web service, set **Root Directory** to `ml-service`,
+**Dockerfile Path** to `DockerFile`, and **Health Check Path** to `/health`.
+The Render Blueprint uses `ml-service` as its Docker context and
+`ml-service/DockerFile` as its Dockerfile.
+
+Set `DATABASE_URL` to the Supabase **transaction pooler** connection string
+(host `*.pooler.supabase.com`, port `6543`) with `sslmode=require`, and set
+`GROQ_API_KEY` if prompt-based playlist generation is needed. Render injects
+`PORT` automatically; do not hardcode it. In the Supabase SQL Editor, ensure
+pgvector is enabled:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
 
 ### `client/.env`
 | Variable | Description | Default / Example |

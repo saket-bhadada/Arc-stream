@@ -3,6 +3,7 @@
 .vscode/
 **/.env
 **/.env.*
+**/.env.*
 **/node_modules/
 **/__pycache__/
 **/*.pyc
