@@ -18,9 +18,12 @@ if (databaseUrl) {
 
   const isLocal = normalizedUrl.includes('localhost') || normalizedUrl.includes('127.0.0.1') || normalizedUrl.includes('@db:');
   const needsSsl = process.env.DB_SSL === 'true' || (process.env.NODE_ENV === 'production' && !isLocal);
+  const connectionUrl = new URL(normalizedUrl);
+  connectionUrl.searchParams.delete('sslmode');
+  connectionUrl.searchParams.delete('ssl');
 
   poolConfig = {
-    connectionString: normalizedUrl,
+    connectionString: connectionUrl.toString(),
     ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
   };
 } else {
