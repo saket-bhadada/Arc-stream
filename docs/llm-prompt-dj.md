@@ -36,3 +36,4 @@ The user prompt is sent to the configured LLM at request time and is not logged 
 
 - The repository does not track `ml-service/training/dataset.csv`. Its existing `training/archive/tracks_features.csv` has `id` and `name` columns and no `popularity`; it cannot produce a popularity-ranked pool. Prompt DJ requires the separate dataset described above.
 - The existing non-Prompt-DJ `/generate_playlist` and `/generate_from_prompt` paths use their prior SQLAlchemy/full-table selection behavior. They are intentionally unchanged; only the new Prompt DJ path is pool restricted.
+- The existing frontend lint suite reports unused `accessToken` bindings in `LlmPromptGenerator.jsx` and `PlaylistGenerator.jsx`, a synchronous state update inside an effect in `LlmPromptGenerator.jsx`, and unused `curve`/`title` callback parameters in `dashboard.jsx`. These are outside this feature and were left unchanged.
