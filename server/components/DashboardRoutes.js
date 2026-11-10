@@ -234,6 +234,70 @@ router.post('/buffer', async (req, res) => {
   }
 });
 
+router.post('/prompt-dj', async (req, res) => {
+  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+  const sessionHistory = Array.isArray(req.body?.session_history)
+    ? req.body.session_history.filter((id) => typeof id === 'string' && id.trim())
+    : [];
+  const tokenState = {
+    accessToken: req.body?.access_token,
+    refreshed: false,
+  };
+
+  if (prompt.length < 2 || prompt.length > 1000) {
+    return res.status(400).json({ error: 'prompt must contain between 2 and 1000 characters' });
+  }
+  if (!tokenState.accessToken) {
+    const refreshed = await refreshSpotifyAccessToken(req, res);
+    if (refreshed) {
+      tokenState.accessToken = refreshed;
+      tokenState.refreshed = true;
+    }
+  }
+  if (!tokenState.accessToken) {
+    return res.status(401).json({ error: 'Missing access token' });
+  }
+
+  const sessionId = req.body?.session_id || randomUUID();
+  try {
+    const response = await fetch(`${ML_BASE}/prompt_dj`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, session_history: sessionHistory }),
+    });
+    if (!response.ok) {
+      throw new Error(`ML service returned ${response.status} for Prompt DJ`);
+    }
+    const mlData = await response.json();
+    const tracks = Array.isArray(mlData?.tracks) ? mlData.tracks : [];
+    if (!tracks.length) {
+      throw new Error('Prompt DJ did not return any tracks.');
+    }
+
+    for (const track of tracks) {
+      await spotifyFetchWithRefresh(
+        req,
+        res,
+        tokenState,
+        `/me/player/queue?uri=${encodeURIComponent(`spotify:track:${track.track_id}`)}`,
+        { method: 'POST' },
+      );
+    }
+
+    return res.json({
+      success: true,
+      session_id: sessionId,
+      mode: mlData.mode,
+      targets: mlData.targets,
+      tracks,
+      access_token: tokenState.refreshed ? tokenState.accessToken : undefined,
+    });
+  } catch (error) {
+    console.error('[Prompt DJ] Request failed:', error.message);
+    return res.status(502).json({ error: error.message });
+  }
+});
+
 const extractTrackId = (track) => {
   const raw = track?.track_id || track?.id || track?.uri;
   if (!raw || typeof raw !== 'string') return null;

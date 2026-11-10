@@ -39,6 +39,20 @@ export const requestBuffer = async (payload) => {
   return data; // { success, tracks: [{ track_id, track_name, artists, predicted_vector }] }
 };
 
+export const requestPromptDj = async (payload) => {
+  const res = await fetch(`${NODE_BASE}/api/ai/prompt-dj`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error ?? `Prompt DJ request failed (${res.status})`);
+  }
+  return data;
+};
+
 export const searchSeedTracks = async (query = 'random', signal) => {
   const res = await fetch(
     `${NODE_BASE}/api/dashboard/search-seeds?q=${encodeURIComponent(query || 'random')}`,
@@ -78,4 +92,3 @@ export const generatePromptPlaylist = async (payload, signal) => {
   }
   return data;
 };
-

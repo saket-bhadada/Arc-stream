@@ -1,7 +1,12 @@
 // client/src/components/dashboard.jsx
 import { useEffect, useRef, useState } from 'react';
 import { usePlayerStore } from '../store/playerStore';
-import { NODE_BASE, fetchTrackVectors, requestBuffer } from '../services/arcApi';
+import {
+  NODE_BASE,
+  fetchTrackVectors,
+  requestBuffer,
+  requestPromptDj,
+} from '../services/arcApi';
 import VectorRadarChart from './VectorRadarChart';
 import TrajectoryGraph from './TrajectoryGraph';
 import QueueTray from './QueueTray';
@@ -376,13 +381,16 @@ const NowPlaying = ({ useEmbedFallback, activeEmbedTrackId, onSelectTrack }) => 
   const [results, setResults] = useState([]);
   const [msg, setMsg] = useState('');
   const [isQueueing, setIsQueueing] = useState(false);
+  const [searchMode, setSearchMode] = useState('vibe');
+  const [isPromptLoading, setIsPromptLoading] = useState(false);
+  const [promptError, setPromptError] = useState('');
+  const [vibeTargets, setVibeTargets] = useState(null);
 
   const albumArt   = currentTrack?.album?.images?.[0]?.url;
   const trackName  = currentTrack?.name  ?? 'Nothing Playing';
   const artistName = currentTrack?.artists?.map((a) => a.name).join(', ') ?? '—';
 
-  const search = async (e) => {
-    e.preventDefault();
+  const submitSearch = async () => {
     if (!query.trim()) return;
     setMsg('Searching…');
     try {
@@ -398,6 +406,54 @@ const NowPlaying = ({ useEmbedFallback, activeEmbedTrackId, onSelectTrack }) => 
     } catch (err) {
       console.error('[Arc-Stream] Database track search failed:', err);
       setMsg(err.message);
+    }
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+    if (searchMode === 'search') {
+      await submitSearch();
+      return;
+    }
+
+    if (isPromptLoading) return;
+    setPromptError('');
+    setIsPromptLoading(true);
+    try {
+      const st = usePlayerStore.getState();
+      const exclusions = [...new Set([
+        ...st.sessionHistory,
+        ...st.upcomingQueue.map((track) => track.track_id),
+        ...st.queuedIds,
+      ])];
+      const data = await requestPromptDj({
+        access_token: st.accessToken,
+        session_id: st.sessionId,
+        prompt: query.trim(),
+        session_history: exclusions,
+      });
+      if (data.access_token) {
+        usePlayerStore.getState().updateAccessToken(data.access_token, 3600);
+      }
+
+      const store = usePlayerStore.getState();
+      const tracks = Array.isArray(data.tracks) ? data.tracks : [];
+      store.setTargetEnergy(data.targets.target_energy);
+      store.enqueueUpcoming(tracks);
+      store.setUpNext(tracks);
+      store.setUpNextStatus('ready');
+      store.setUpNextError(null);
+      store.setPredictedVector(tracks[tracks.length - 1]?.predicted_vector ?? null);
+      setVibeTargets(data.targets);
+      setResults([]);
+      setQuery('');
+      setMsg(`Queued ${tracks.length} ${data.mode === 'trajectory' ? 'vibe tracks' : 'track'} in Up Next and Spotify.`);
+    } catch (err) {
+      setPromptError(err.message || 'Prompt DJ could not generate tracks. Please try again.');
+      setMsg('');
+    } finally {
+      setIsPromptLoading(false);
     }
   };
 
@@ -522,17 +578,72 @@ const NowPlaying = ({ useEmbedFallback, activeEmbedTrackId, onSelectTrack }) => 
 
       {msg && <p style={{ width: '100%', fontSize: 12, color: '#B3B3B3', margin: '6px 0 0' }}>{msg}</p>}
       {deviceId && (
-        <form onSubmit={search} style={{ width: '100%', marginTop: 12 }}>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search a song to add to the queue…"
-            style={{
-              width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 20,
-              border: '1px solid #282828', background: '#181818', color: '#fff',
-            }}
-          />
-          {results.map((t) => (
+        <div style={{ width: '100%', marginTop: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginBottom: 8 }}>
+            {['vibe', 'search'].map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => {
+                  setSearchMode(mode);
+                  setResults([]);
+                  setMsg('');
+                  setPromptError('');
+                }}
+                aria-pressed={searchMode === mode}
+                style={{
+                  ...s.pill(searchMode === mode),
+                  padding: '5px 12px',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {mode === 'vibe' ? 'Vibe' : 'Search'}
+              </button>
+            ))}
+          </div>
+          <form onSubmit={submit} style={{ display: 'flex', gap: 8 }}>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              disabled={isPromptLoading}
+              placeholder={searchMode === 'vibe'
+                ? 'Describe a vibe… e.g. rainy 2am drive'
+                : 'Search a song to add to the queue…'}
+              style={{
+                minWidth: 0, flex: 1, boxSizing: 'border-box', padding: '8px 12px', borderRadius: 20,
+                border: '1px solid #282828', background: '#181818', color: '#fff',
+              }}
+            />
+            <button
+              type="submit"
+              disabled={isPromptLoading || !query.trim()}
+              style={{
+                ...s.queueBtn,
+                padding: '8px 14px',
+                opacity: isPromptLoading || !query.trim() ? 0.55 : 1,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 7,
+              }}
+            >
+              {isPromptLoading && <span className="prompt-spinner" aria-hidden="true" />}
+              {isPromptLoading ? 'Reading vibe…' : searchMode === 'vibe' ? 'Generate' : 'Search'}
+            </button>
+          </form>
+          {promptError && searchMode === 'vibe' && (
+            <p role="alert" style={{ ...s.status('error'), marginTop: 8 }}>{promptError}</p>
+          )}
+          {vibeTargets && searchMode === 'vibe' && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 9 }}>
+              <span style={s.vibeChip}>{vibeTargets.summary}</span>
+              <span style={s.vibeChip}>Energy {vibeTargets.target_energy.toFixed(2)}</span>
+              <span style={s.vibeChip}>Valence {vibeTargets.target_valence.toFixed(2)}</span>
+              <span style={s.vibeChip}>
+                Tempo {Math.round(vibeTargets.tempo_min)}–{Math.round(vibeTargets.tempo_max)} BPM
+              </span>
+            </div>
+          )}
+          {searchMode === 'search' && results.map((t) => (
             <button
               key={t.track_id} type="button" onClick={() => playTrack(t)}
               disabled={isQueueing}
@@ -545,7 +656,7 @@ const NowPlaying = ({ useEmbedFallback, activeEmbedTrackId, onSelectTrack }) => 
               {t.track_name} <span style={{ color: '#B3B3B3' }}>· {t.artist_name}</span>
             </button>
           ))}
-        </form>
+        </div>
       )}
     </div>
   );
@@ -1056,6 +1167,10 @@ const s = {
     margin: 0, fontSize: 12, lineHeight: 1.5, textAlign: 'left',
     color: kind === 'error' ? '#FF6B6B' : kind === 'ok' ? GREEN : MUTED,
   }),
+  vibeChip: {
+    border: '1px solid #333', background: '#181818', color: '#B3B3B3',
+    padding: '5px 9px', borderRadius: 14, fontSize: 11,
+  },
 
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 10 },
   drawer: {
