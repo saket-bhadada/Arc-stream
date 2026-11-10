@@ -6,13 +6,17 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from math import isfinite
+from pathlib import Path
 from typing import List, Optional, Sequence
 
 import numpy as np
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from app.config import LATENT_DIM, MAX_SEQ_LEN, MIN_SEQ_LEN
 from app.database_manager import ArcStreamDB
@@ -22,6 +26,8 @@ from . import models, database
 from .inference import predict_next_z_vector
 from .trajectory import generate_energy_curve
 from app.prompt.groq_planner import plan_playlist_from_prompt
+from app.track_pool import PoolTrack, TrackPool, get_track_pool, load_track_pool
+from app.vibe_parser import VibeTargets, parse_vibe
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,13 @@ async def lifespan(application: FastAPI):
         bool(os.getenv("DATABASE_URL")),
     )
     logger.info("[Startup] Database pool and Torch model will initialize on demand.")
+    try:
+        load_track_pool()
+    except (OSError, ValueError) as error:
+        logger.warning(
+            "[Track Pool] Prompt DJ is unavailable (%s).",
+            type(error).__name__,
+        )
     try:
         yield
     finally:
@@ -72,6 +85,11 @@ class QueuePredictRequest(BaseModel):
     seed_track_ids: list[str] = Field(min_length=1, max_length=9)
     target_energy: float = Field(ge=0.0, le=1.0)
     count: int = Field(default=5, ge=1, le=10)
+    session_history: list[str] = Field(default_factory=list)
+
+
+class PromptDjRequest(BaseModel):
+    prompt: str = Field(min_length=2, max_length=1000)
     session_history: list[str] = Field(default_factory=list)
 
 
@@ -114,6 +132,130 @@ async def recommend_one(
     return track, [float(value) for value in selected_vector]
 
 
+def _vibe_distance(track: PoolTrack, targets: VibeTargets) -> float:
+    tempo_midpoint = (targets.tempo_min + targets.tempo_max) / 2
+    return float(np.sqrt(
+        (track.energy - targets.target_energy) ** 2
+        + (track.valence - targets.target_valence) ** 2
+        + (track.danceability - targets.target_danceability) ** 2
+        + ((track.tempo - tempo_midpoint) / 200.0) ** 2
+    ))
+
+
+async def _select_prompt_seeds(
+    pool: TrackPool,
+    targets: VibeTargets,
+    session_history: Sequence[str],
+) -> list[tuple[PoolTrack, list[float]]]:
+    excluded = set(session_history)
+    ranked_tracks = sorted(
+        (track for track in pool.tracks if track.track_id not in excluded),
+        key=lambda track: (_vibe_distance(track, targets), track.track_id),
+    )
+    selected: list[tuple[PoolTrack, list[float]]] = []
+
+    for offset in range(0, len(ranked_tracks), 100):
+        batch = ranked_tracks[offset:offset + 100]
+        vectors = await arc_db.get_track_z_vectors_batch(
+            [track.track_id for track in batch]
+        )
+        for track in batch:
+            vector = vectors.get(track.track_id)
+            if vector is not None:
+                selected.append((track, vector))
+                if len(selected) == 5:
+                    return list(reversed(selected))
+
+    return list(reversed(selected))
+
+
+def _rerank_prompt_candidates(
+    candidates: list[dict[str, object]],
+    targets: VibeTargets,
+) -> list[dict[str, object]]:
+    tempo_midpoint = (targets.tempo_min + targets.tempo_max) / 2
+
+    def score(candidate: dict[str, object]) -> tuple[float, str]:
+        value = (
+            abs(float(candidate.get("valence", 0.5)) - targets.target_valence)
+            + abs(float(candidate.get("danceability", 0.5)) - targets.target_danceability)
+            + abs(float(candidate.get("tempo", tempo_midpoint)) - tempo_midpoint) / 200.0
+        )
+        return value, str(candidate["track_id"])
+
+    return sorted(candidates, key=score)
+
+
+async def _prompt_candidate(
+    prediction: Sequence[float],
+    excluded_ids: set[str],
+    pool: TrackPool,
+    targets: VibeTargets,
+) -> dict[str, object]:
+    candidates = await arc_db.find_nearest_track(
+        predicted_vector=list(prediction),
+        session_history=sorted(excluded_ids),
+        top_k=30,
+        return_n=30,
+        allowed_ids=sorted(pool.ids),
+    )
+    ranked = _rerank_prompt_candidates(candidates, targets)
+    if not ranked:
+        raise HTTPException(status_code=404, detail="No unused tracks remain in the Prompt DJ pool.")
+    return ranked[0]
+
+
+async def _generate_prompt_tracks(
+    pool: TrackPool,
+    targets: VibeTargets,
+    seeds: list[tuple[PoolTrack, list[float]]],
+    session_history: Sequence[str],
+) -> list[dict[str, object]]:
+    seed_ids = {track.track_id for track, _ in seeds}
+    excluded_ids = set(session_history) | seed_ids
+    rolling_sequence = [vector for _, vector in seeds]
+    seed_centroid = np.mean(np.asarray(rolling_sequence, dtype=np.float32), axis=0)
+    model = load_inference_model()
+    tracks: list[dict[str, object]] = []
+    energy_targets = targets.energy_curve or [targets.target_energy]
+
+    for step, target_energy in enumerate(energy_targets, start=1):
+        prediction = predict_next_latent_vector(
+            model=model,
+            sequence_history=rolling_sequence[-5:],
+            target_energy=target_energy,
+        )
+        if targets.energy_curve:
+            blended = (
+                0.55 * np.asarray(prediction, dtype=np.float32)
+                + 0.45 * seed_centroid
+            )
+            blended[1] = target_energy
+            prediction = [float(np.clip(value, 0.0, 1.0)) for value in blended]
+
+        match = await _prompt_candidate(prediction, excluded_ids, pool, targets)
+        track_id = str(match["track_id"])
+        excluded_ids.add(track_id)
+        vector = match.get("z_vector")
+        if not isinstance(vector, list) or len(vector) != LATENT_DIM:
+            raise HTTPException(status_code=500, detail="Database returned an invalid track vector.")
+
+        tracks.append({
+            "step": step,
+            "track_id": track_id,
+            "track_name": match.get("track_name") or f"Track {track_id[:8]}",
+            "artists": match.get("artists") or "Unknown Artist",
+            "artist_name": match.get("artists") or "Unknown Artist",
+            "energy": float(match.get("energy", 0.0)),
+            "target_energy": float(target_energy),
+            "predicted_vector": prediction,
+        })
+        rolling_sequence.append([float(value) for value in vector])
+        rolling_sequence = rolling_sequence[-5:]
+
+    return tracks
+
+
 @app.get("/health")
 async def health_endpoint() -> dict[str, str]:
     return {"status": "ok"}
@@ -154,6 +296,37 @@ async def predict_buffer(payload: BufferRequest) -> dict[str, list[dict[str, obj
         excluded_ids=payload.session_history,
     )
     return {"tracks": [track]}
+
+
+@app.post("/prompt_dj")
+async def prompt_dj(payload: PromptDjRequest) -> dict[str, object]:
+    pool = get_track_pool()
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Prompt DJ track pool is not configured.")
+
+    prompt = payload.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="prompt must not be blank.")
+
+    targets = await parse_vibe(prompt)
+    seeds = await _select_prompt_seeds(pool, targets, payload.session_history)
+    if len(seeds) < 5:
+        raise HTTPException(
+            status_code=404,
+            detail="Fewer than five unused Prompt DJ seed tracks have mapped vectors.",
+        )
+
+    tracks = await _generate_prompt_tracks(
+        pool=pool,
+        targets=targets,
+        seeds=seeds,
+        session_history=payload.session_history,
+    )
+    return {
+        "mode": "trajectory" if targets.energy_curve else "single",
+        "targets": targets.model_dump(),
+        "tracks": tracks,
+    }
 
 
 def get_camelot(key: Optional[int], mode: Optional[int]) -> tuple[int, str]:

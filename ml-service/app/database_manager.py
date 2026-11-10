@@ -37,6 +37,7 @@ class ArcStreamDB:
         self.dsn = dsn
         self.pool: Optional[asyncpg.Pool] = None
         self._connect_lock = asyncio.Lock()
+        self._iterative_scan_supported: bool | None = None
 
     async def connect(self) -> None:
         if self.pool is not None:
@@ -109,40 +110,117 @@ class ArcStreamDB:
         predicted_vector: Sequence[float],
         excluded_track_ids: Sequence[str] = (),
         limit: int = 1,
+        allowed_ids: Sequence[str] | None = None,
     ) -> list[dict[str, object]]:
         """Return unique nearest tracks, excluding IDs already used in a session."""
-        if limit < 1:
+        if limit < 1 or (allowed_ids is not None and not allowed_ids):
             return []
 
-        query = """
-            SELECT
-                id           AS track_id,
-                track_name,
-                artists,
-                energy,
-                z_vector::text AS z_vector
-            FROM  track_features
-            WHERE NOT (id = ANY($2::text[]))
-            ORDER BY z_vector <-> $1::vector
-            LIMIT $3
-        """
+        if allowed_ids is None:
+            query = """
+                SELECT
+                    id           AS track_id,
+                    track_name,
+                    artists,
+                    energy,
+                    valence,
+                    danceability,
+                    tempo,
+                    z_vector::text AS z_vector
+                FROM  track_features
+                WHERE NOT (id = ANY($2::text[]))
+                ORDER BY z_vector <-> $1::vector
+                LIMIT $3
+            """
+        else:
+            query = """
+                SELECT
+                    id           AS track_id,
+                    track_name,
+                    artists,
+                    energy,
+                    valence,
+                    danceability,
+                    tempo,
+                    z_vector::text AS z_vector
+                FROM  track_features
+                WHERE id = ANY($1::text[])
+                  AND NOT (id = ANY($3::text[]))
+                ORDER BY z_vector <-> $2::vector
+                LIMIT $4
+            """
+
         pool = await self._get_pool()
-        rows = await pool.fetch(
-            query,
-            _as_pgvector(predicted_vector),
-            list(excluded_track_ids),
-            limit,
+        iterative_scan = (
+            allowed_ids is not None
+            and await self._supports_iterative_scan(pool)
         )
+        requested_limit = limit
+        max_fetch = len(allowed_ids) if allowed_ids is not None else limit
+        fetch_limit = min(
+            max_fetch,
+            limit if iterative_scan else max(limit * 4, limit),
+        )
+        rows = []
+
+        async with pool.acquire() as connection:
+            while fetch_limit > 0:
+                if allowed_ids is None:
+                    params = (
+                        _as_pgvector(predicted_vector),
+                        list(excluded_track_ids),
+                        fetch_limit,
+                    )
+                else:
+                    params = (
+                        list(allowed_ids),
+                        _as_pgvector(predicted_vector),
+                        list(excluded_track_ids),
+                        fetch_limit,
+                    )
+
+                if iterative_scan:
+                    async with connection.transaction():
+                        await connection.execute(
+                            "SET LOCAL hnsw.iterative_scan = 'strict_order'"
+                        )
+                        rows = await connection.fetch(query, *params)
+                else:
+                    rows = await connection.fetch(query, *params)
+
+                if len(rows) >= requested_limit or fetch_limit >= max_fetch:
+                    break
+                fetch_limit = min(max_fetch, max(fetch_limit * 2, requested_limit))
+
         return [
             {
                 "track_id": row["track_id"],
                 "track_name": row["track_name"],
                 "artists": row["artists"],
-                "energy": row["energy"],
+                "energy": float(row["energy"]) if row["energy"] is not None else 0.0,
+                "valence": float(row["valence"]) if row["valence"] is not None else 0.0,
+                "danceability": (
+                    float(row["danceability"]) if row["danceability"] is not None else 0.0
+                ),
+                "tempo": float(row["tempo"]) if row["tempo"] is not None else 0.0,
                 "z_vector": _parse_pgvector(row["z_vector"]),
             }
-            for row in rows
+            for row in rows[:requested_limit]
         ]
+
+    async def _supports_iterative_scan(self, pool: asyncpg.Pool) -> bool:
+        if self._iterative_scan_supported is not None:
+            return self._iterative_scan_supported
+
+        version = await pool.fetchval(
+            "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+        )
+        try:
+            major, minor = (int(part) for part in str(version).split(".")[:2])
+            self._iterative_scan_supported = (major, minor) >= (0, 8)
+        except (TypeError, ValueError):
+            self._iterative_scan_supported = False
+        return self._iterative_scan_supported
 
     async def find_nearest_track(
         self,
@@ -150,10 +228,14 @@ class ArcStreamDB:
         session_history: list[str],
         top_k: int = 30,
         return_n: int = 3,
+        allowed_ids: Sequence[str] | None = None,
     ) -> list[dict]:
         fetch_limit = max(return_n, top_k + len(session_history))
         candidates = await self.find_nearest_tracks(
-            predicted_vector, session_history, limit=fetch_limit
+            predicted_vector,
+            session_history,
+            limit=fetch_limit,
+            allowed_ids=allowed_ids,
         )
         return candidates[:return_n]
 
