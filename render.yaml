@@ -17,6 +17,18 @@ services:
         value: llama-3.3-70b-versatile
       - key: GROQ_API_URL
         value: https://api.groq.com/openai/v1/chat/completions
+      - key: LLM_PROVIDER
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_TIMEOUT_S
+        sync: false
+      - key: LLM_TOP_N
+        sync: false
+      - key: LLM_POOL_CSV_PATH
+        sync: false
+      - key: OLLAMA_BASE_URL
+        sync: false
 
   # ─── 2. Node.js Express Gateway & Spotify OAuth Server ────────────────────
   - type: web
