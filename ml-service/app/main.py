@@ -688,5 +688,9 @@ async def generate_from_prompt(payload: PromptPlaylistRequest, db: Session = Dep
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.exception("[Prompt DJ] generate_from_prompt failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Playlist generation is unavailable because the track database or model could not generate real tracks.",
+        ) from exc

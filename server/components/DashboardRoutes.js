@@ -593,6 +593,126 @@ const generatePlaylistPreview = async (req, res) => {
 router.post('/generate-playlist', generatePlaylistPreview);
 router.post('/export-playlist', exportPlaylist);
 
+const buildPromptFallbackPlan = async (prompt, trackCount, seedTrackIds = []) => {
+  const cleanPrompt = (prompt || '').trim();
+  const lowerPrompt = cleanPrompt.toLowerCase();
+  const safeCount = Math.max(5, Math.min(25, Number(trackCount) || 10));
+
+  const energyCurve = (() => {
+    if (/workout|gym|hype|phonk|rave|intense|peak|hard/.test(lowerPrompt)) {
+      return Array.from({ length: safeCount }, (_, index) => {
+        const t = safeCount === 1 ? 0 : index / (safeCount - 1);
+        const curve = 0.55 + (0.95 - 0.55) * Math.sin((Math.PI / 2) * t);
+        return Number(Math.min(1, Math.max(0.15, curve)).toFixed(3));
+      });
+    }
+    if (/study|rain|chill|lofi|calm|ambient|sleep|soft/.test(lowerPrompt)) {
+      return Array.from({ length: safeCount }, (_, index) => {
+        const t = safeCount === 1 ? 0 : index / (safeCount - 1);
+        const curve = 0.22 + (0.62 - 0.22) * (1 - Math.cos((Math.PI * t) / 2));
+        return Number(Math.min(1, Math.max(0.08, curve)).toFixed(3));
+      });
+    }
+    if (/build|rise|escalat|sunrise|progressive|ramp/.test(lowerPrompt)) {
+      return Array.from({ length: safeCount }, (_, index) => {
+        const t = safeCount === 1 ? 0 : index / (safeCount - 1);
+        const curve = 0.3 + (1 - 0.3) * t;
+        return Number(Math.min(1, Math.max(0.08, curve)).toFixed(3));
+      });
+    }
+    return Array.from({ length: safeCount }, (_, index) => {
+      const t = safeCount === 1 ? 0 : index / (safeCount - 1);
+      const curve = 0.38 + 0.42 * Math.sin(Math.PI * t);
+      return Number(Math.min(1, Math.max(0.1, curve)).toFixed(3));
+    });
+  })();
+
+  const title = `Arc-Stream: ${cleanPrompt.slice(0, 24).trim() || 'Prompt Mix'}`;
+  const targetValence = /happy|uplift|sunset|summer|sunrise|joy|warm|beach/.test(lowerPrompt) ? 0.78 : /sad|melanchol|rain|night|dark|lonely|dreamy/.test(lowerPrompt) ? 0.28 : 0.56;
+  const bpmRange = /gym|workout|phonk|hard|rave|peak/.test(lowerPrompt) ? [120, 150] : /study|rain|lofi|chill|sleep|ambient/.test(lowerPrompt) ? [70, 105] : [100, 128];
+  const seedIds = Array.isArray(seedTrackIds) ? seedTrackIds.filter((id) => typeof id === 'string' && id.trim()) : [];
+
+  let rows = [];
+  try {
+    if (seedIds.length > 0) {
+      const { rows: seedRows } = await db.query(
+        `SELECT id AS track_id, track_name, artists, energy, valence, tempo
+         FROM track_features
+         WHERE id = ANY($1::text[])
+         LIMIT ${Math.min(5, seedIds.length)}`,
+        [seedIds],
+      );
+      rows = seedRows;
+    }
+
+    const keywordBits = cleanPrompt
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((word) => word.length > 3)
+      .slice(0, 3);
+    if (rows.length < safeCount && keywordBits.length > 0) {
+      const { rows: queryRows } = await db.query(
+        `SELECT id AS track_id, track_name, artists, energy, valence, tempo
+         FROM track_features
+         WHERE ${keywordBits.map((_, index) => `LOWER(track_name) ILIKE $${index + 1} OR LOWER(artists) ILIKE $${index + 1}`).join(' OR ')}
+         ORDER BY ABS(energy - $${keywordBits.length + 1})
+         LIMIT $${keywordBits.length + 2}`,
+        [...keywordBits.map((word) => `%${word}%`), 0.55, Math.max(12, safeCount * 2)],
+      );
+      rows = [...rows, ...queryRows];
+    }
+
+    if (rows.length < safeCount) {
+      const { rows: queryRows } = await db.query(
+        `SELECT id AS track_id, track_name, artists, energy, valence, tempo
+         FROM track_features
+         ORDER BY ABS(energy - $1)
+         LIMIT $2`,
+        [0.55, Math.max(12, safeCount * 2)],
+      );
+      rows = [...rows, ...queryRows];
+    }
+
+    const seen = new Set();
+    const tracks = rows
+      .filter((row) => row && row.track_id && !seen.has(row.track_id) && seen.add(row.track_id))
+      .slice(0, safeCount)
+      .map((row, index) => ({
+        position: index + 1,
+        track_id: String(row.track_id),
+        track_name: row.track_name || `Track ${String(row.track_id).slice(0, 8)}`,
+        artists: row.artists || 'Unknown Artist',
+        artist_name: row.artists || 'Unknown Artist',
+        energy: Number(row.energy ?? 0.5),
+        actual_energy: Number(row.energy ?? 0.5),
+        valence: Number(row.valence ?? 0.5),
+        tempo: Number(row.tempo ?? 120),
+      }));
+
+    if (tracks.length === 0) {
+      throw new Error('No real tracks were available in the database for a prompt fallback playlist.');
+    }
+
+    return {
+      success: true,
+      title,
+      playlist_title: title,
+      vibe_summary: `Adaptive fallback mix shaped for “${cleanPrompt}” with a ${bpmRange[0]}-${bpmRange[1]} BPM arc and steady energy progression.`,
+      target_valence: targetValence,
+      recommended_bpm_range: bpmRange,
+      suggested_seeds: [],
+      energy_curve: energyCurve,
+      track_count: tracks.length,
+      tracks,
+      playlist: tracks,
+    };
+  } catch (dbErr) {
+    console.error('[Prompt Playlist] Fallback DB lookup failed:', dbErr.message);
+    throw new Error(`Prompt playlist generation is unavailable: ${dbErr.message}`);
+  }
+};
+
 const generatePromptPlaylist = async (req, res) => {
   try {
     const {
@@ -608,15 +728,21 @@ const generatePromptPlaylist = async (req, res) => {
       return res.status(400).json({ error: 'prompt is required and must be at least 2 characters.' });
     }
 
-    const mlData = await mlFetch('/generate_from_prompt', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt: prompt.trim(),
-        track_count: Number(trackCount) || 10,
-        seed_track_ids: Array.isArray(seedTrackIds) ? seedTrackIds : [],
-      }),
-    });
+    let mlData;
+    try {
+      mlData = await mlFetch('/generate_from_prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: prompt.trim(),
+          track_count: Number(trackCount) || 10,
+          seed_track_ids: Array.isArray(seedTrackIds) ? seedTrackIds : [],
+        }),
+      });
+    } catch (mlError) {
+      console.warn('[Prompt Playlist] ML service failed; using code-level fallback:', mlError.message);
+      mlData = await buildPromptFallbackPlan(prompt, trackCount, seedTrackIds);
+    }
 
     const tracks = mlData.tracks || mlData.playlist || [];
     const title = customPlaylistName || mlData.title || mlData.playlist_title || `Arc-Stream: ${prompt.slice(0, 24).trim()}`;
